@@ -1,0 +1,130 @@
+FILE MANIFEST (input sizes)
+============================================================
+  CSV1 segments: 364,409 x 8
+  CSV2 company index: 202,076 x 9
+  RDQ: 754,776 x 9
+  CCM link: 32,760 x 10
+  Fundamentals: 202,994 x 14
+  CRSP daily: 29,121,191 x 6
+  firm_like_cnms_list.txt: 25,354 lines
+
+Checkpoint version mismatch or missing (current=2) — ignoring existing outputs, will rerun all stages
+  Removed rdq_lookup.csv
+  Removed edges_path_a.csv
+  Removed master_edges.csv
+  Removed returns_panel.csv
+
+============================================================
+STAGE 1 — RDQ LOOKUP
+============================================================
+Total unique (gvkey, srcdate) pairs: 61,042
+Matched via rdq: 59,494 (97.5%)
+Using fallback: 1,591 (2.6%)
+Median filing lag (rdq - srcdate) for matched rows: 57 days
+Rows with rdq < srcdate (errors): 2
+Saved rdq_lookup.csv
+
+============================================================
+STAGE 2 — CUSTOMER NAME RESOLUTION
+============================================================
+Total CSV1 rows: 364,409
+Firm-like cnms rows: 298,746
+MANUAL_MAP hits: 1,541 rows
+KNOWN_NON_PUBLIC skipped: 0 rows
+Self-loops removed: 74
+HIGH_CONFIDENCE edges: 27,633 (9.2% of firm-like rows)
+MEDIUM_CONFIDENCE edges: 7,541
+REVIEW_NEEDED: 33,760
+UNMATCHED: 46,048
+Final usable edge count (HIGH + MEDIUM): 35,162 unique (supplier, customer, year)
+Revenue-weighted coverage (matched salecs / total salecs): 4.4%
+Edges with null pct_revenue: 17,228 (13.5%)
+
+============================================================
+STAGE 3 — MASTER EDGE TABLE
+============================================================
+Total edges in: 35,174
+Edges with valid supplier permno: 31,558 (89.7%)
+Edges with valid customer permno: 26,996 (76.7%)
+Edges with BOTH permnos valid: 24,392 (69.3%)
+Edges missing at least one permno: 10,782
+Sector breakdown of suppliers (gsector counts):
+  60.0: 9,479
+  45.0: 6,099
+  35.0: 5,325
+  20.0: 3,825
+  25.0: 3,004
+  10.0: 2,586
+  40.0: 1,209
+  30.0: 1,086
+  15.0: 1,075
+  50.0: 1,019
+  55.0: 412
+Year distribution of edges (by srcdate year):
+  2010: 2,036
+  2011: 2,161
+  2012: 2,269
+  2013: 2,418
+  2014: 2,423
+  2015: 2,456
+  2016: 2,446
+  2017: 2,430
+  2018: 2,412
+  2019: 2,424
+  2020: 2,389
+  2021: 2,354
+  2022: 2,317
+  2023: 2,264
+  2024: 2,121
+  2025: 254
+Saved master_edges.csv
+
+============================================================
+STAGE 4 — RETURNS PANEL
+============================================================
+Target permnos (from master_edges): 3,528
+Permnos found in CRSP: 3,502 (99.3%)
+Missing permnos (in edges but not CRSP): 26
+Date range of panel: 2010-01-04 00:00:00 to 2024-12-31 00:00:00
+Total rows in returns_panel: 8,537,493
+Delisting events: 0
+Saved returns_panel.csv
+
+============================================================
+STAGE 5 — PIPELINE SUMMARY
+============================================================
+FINAL ANALYSIS-READY UNIVERSE:
+  Edges with both permnos valid AND returns data available: 24,357
+  Unique suppliers in universe: 2,148
+  Unique customers in universe: 1,489
+  Unique (supplier, customer) pairs: 6,056
+  Date range of edges: 2010-02-23 to 2026-01-30
+  Revenue-weighted coverage of original CSV1 salecs: 4.4%
+DATA QUALITY FLAGS:
+  Edges using fallback signal_date (not true rdq): 459 (1.3%)
+  Edges with null pct_revenue: 10,028 (28.5%)
+  MEDIUM_CONFIDENCE edges (lower trust): 7,541 (21.4%)
+TOP 10 CUSTOMERS BY EDGE FREQUENCY:
+  EXAS, 141277, edge_count=756, total_salecs=187938.95
+  MCK, 7171, edge_count=625, total_salecs=765120.03
+  CAH, 2751, edge_count=604, total_salecs=476586.23
+  AMZN, 64768, edge_count=565, total_salecs=121923.20
+  OHI, 25633, edge_count=485, total_salecs=45611.98
+  F, 4839, edge_count=421, total_salecs=294680.33
+  TGT, 3813, edge_count=384, total_salecs=30726.01
+  WMT, 11259, edge_count=378, total_salecs=181777.40
+  GM, 5073, edge_count=355, total_salecs=228001.31
+  NDIA, 43232, edge_count=335, total_salecs=131098.65
+TOP 10 SUPPLIERS BY TOTAL DISCLOSED REVENUE:
+  31673.0, total_salecs=708082.32, num_customers=2.0
+  2751.0, total_salecs=648507.25, num_customers=3.0
+  7171.0, total_salecs=559852.03, num_customers=2.0
+  2403.0, total_salecs=306045.75, num_customers=8.0
+  1602.0, total_salecs=296381.00, num_customers=5.0
+  6946.0, total_salecs=247907.00, num_customers=10.0
+  6008.0, total_salecs=232213.36, num_customers=3.0
+  8530.0, total_salecs=223817.12, num_customers=3.0
+  5180.0, total_salecs=191456.64, num_customers=2.0
+  30990.0, total_salecs=182287.00, num_customers=1.0
+Saved transactions.csv: 24,357 rows (supplier, customer, amount, date)
+Saved pipeline_summary.txt
