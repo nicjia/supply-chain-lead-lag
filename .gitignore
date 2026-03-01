@@ -13,10 +13,13 @@ __pycache__/
 dist/
 build/
 
-# Data (large CSVs – keep paths but don't commit raw data)
+# Data: only transactions.csv is committed for the team; rest ignored (too large or not needed)
 data/*.csv
 data/processed/*.csv
+!data/processed/transactions.csv
 !data/processed/.pipeline_version
+data/zips/
+data/processed/zips/
 
 # IDE / OS
 .idea/
