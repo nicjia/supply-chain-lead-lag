@@ -4,3 +4,4 @@ pipeline
 parse.cpp
 probe.py
 src/
+*.parquet
