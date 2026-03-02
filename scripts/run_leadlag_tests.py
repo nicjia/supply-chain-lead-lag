@@ -1,40 +1,64 @@
 # scripts/run_leadlag_tests.py
 
-'''
-Usage:
-
-# Baseline
-python scripts/run_leadlag_tests.py --panel data/leadlag_panel.parquet --horizon_max 5
-
-# Winsorized y
-python scripts/run_leadlag_tests.py --winsorize
-
-# Only days where signal is nonzero
-python scripts/run_leadlag_tests.py --nonzero_y
-
-# Both
-python scripts/run_leadlag_tests.py --winsorize --nonzero_y
-'''
 from __future__ import annotations
-
 import argparse
 import numpy as np
 import pandas as pd
 from linearmodels.panel import PanelOLS
+
+
+'''
+Forward baseline:
+python scripts/run_leadlag_tests.py \
+  --panel data/leadlag_panel_forward.parquet \
+  --direction forward
+
+Reverse baseline:
+python scripts/run_leadlag_tests.py \
+  --panel data/leadlag_panel_reverse.parquet \
+  --direction reverse
+
+Forward winsorized & nonzero:
+python scripts/run_leadlag_tests.py \
+  --panel data/leadlag_panel_forward.parquet \
+  --direction forward --winsorize --nonzero
+
+Reverse winsorized & nonzero:
+python scripts/run_leadlag_tests.py \
+  --panel data/leadlag_panel_reverse.parquet \
+  --direction reverse --winsorize --nonzero
+
+'''
+# --------------------------------------------------
+# Utils
+# --------------------------------------------------
 
 def winsorize(s: pd.Series, lo=0.01, hi=0.99) -> pd.Series:
     ql = s.quantile(lo)
     qh = s.quantile(hi)
     return s.clip(ql, qh)
 
-def run_horizon_regs(panel: pd.DataFrame, horizon_max: int, y_col: str) -> pd.DataFrame:
-    df = panel.copy()
-    df = df.set_index(["supplier_gvkey", "date"]).sort_index()
+def run_panel_reg(
+    panel: pd.DataFrame,
+    entity_col: str,
+    ret_prefix: str,
+    signal_col: str,
+    horizon_max: int,
+) -> pd.DataFrame:
 
+    df = panel.set_index([entity_col, "date"]).sort_index()
     results = []
+
     for h in range(1, horizon_max + 1):
-        yvar = df[f"sup_r_fwd_{h}"]
-        X = df[[y_col, "sup_r_lag_1", "sup_r_lag_2", "sup_r_lag_3", "sup_r_lag_4", "sup_r_lag_5"]].copy()
+
+        yvar = df[f"{ret_prefix}_fwd_{h}"]
+        X = df[[signal_col,
+                f"{ret_prefix}_lag_1",
+                f"{ret_prefix}_lag_2",
+                f"{ret_prefix}_lag_3",
+                f"{ret_prefix}_lag_4",
+                f"{ret_prefix}_lag_5"]].copy()
+
         X["const"] = 1.0
 
         mod = PanelOLS(yvar, X, entity_effects=True, time_effects=True)
@@ -42,44 +66,90 @@ def run_horizon_regs(panel: pd.DataFrame, horizon_max: int, y_col: str) -> pd.Da
 
         results.append({
             "h": h,
-            "beta_y": float(res.params[y_col]),
-            "se_y": float(res.std_errors[y_col]),
-            "t_y": float(res.tstats[y_col]),
-            "p_y": float(res.pvalues[y_col]),
+            "beta": float(res.params[signal_col]),
+            "se": float(res.std_errors[signal_col]),
+            "t": float(res.tstats[signal_col]),
+            "p": float(res.pvalues[signal_col]),
             "nobs": int(res.nobs),
         })
-        print(f"h={h} beta={res.params[y_col]:.6g} t={res.tstats[y_col]:.3g} p={res.pvalues[y_col]:.3g} n={res.nobs}")
+
+        print(
+            f"h={h} beta={res.params[signal_col]:.6g} "
+            f"t={res.tstats[signal_col]:.3g} "
+            f"p={res.pvalues[signal_col]:.3g}"
+        )
 
     return pd.DataFrame(results)
 
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
 def main():
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--panel", type=str, default="data/leadlag_panel.parquet")
+    ap.add_argument("--direction", type=str, default="forward",
+                    choices=["forward", "reverse"])
     ap.add_argument("--horizon_max", type=int, default=5)
     ap.add_argument("--winsorize", action="store_true")
-    ap.add_argument("--nonzero_y", action="store_true")
-    ap.add_argument("--out_csv", type=str, default="data/leadlag_horizon_results.csv")
+    ap.add_argument("--nonzero", action="store_true")
     args = ap.parse_args()
 
     panel = pd.read_parquet(args.panel)
     panel["date"] = pd.to_datetime(panel["date"]).dt.normalize()
 
-    # Prepare y variants
+    # --------------------------------------------------
+    # Forward or Reverse Setup
+    # --------------------------------------------------
+
+    if args.direction == "forward":
+        entity_col = "supplier_gvkey"
+        signal_col = "y"
+        ret_prefix = "sup_r"
+
+    else:  # reverse
+        entity_col = "customer_gvkey"
+        signal_col = "z"
+        ret_prefix = "cust_r"
+
+    # Winsorize if requested
     if args.winsorize:
-        panel["y_w"] = winsorize(panel["y"], 0.01, 0.99)
-        y_col = "y_w"
-    else:
-        y_col = "y"
+        panel[f"{signal_col}_w"] = winsorize(panel[signal_col])
+        signal_col = f"{signal_col}_w"
 
-    if args.nonzero_y:
-        panel = panel.loc[panel[y_col] != 0.0].copy()
+    # Nonzero filter
+    if args.nonzero:
+        panel = panel.loc[panel[signal_col] != 0.0].copy()
 
-    print(f"[load] {args.panel} shape={panel.shape:,} suppliers={panel['supplier_gvkey'].nunique():,} dates={panel['date'].nunique():,}")
-    print(f"[y] col={y_col} std={panel[y_col].std():.6g} mean_abs={panel[y_col].abs().mean():.6g} nonzero={(panel[y_col]!=0).mean():.3%}")
+    # Diagnostics
+    print(f"\n[Direction] {args.direction.upper()}")
+    print(f"[Signal] {signal_col}")
+    print(f"[Std] {panel[signal_col].std():.6g}")
+    print(f"[Nonzero] {(panel[signal_col]!=0).mean():.3%}")
 
-    out = run_horizon_regs(panel, args.horizon_max, y_col=y_col)
-    out.to_csv(args.out_csv, index=False)
-    print(f"[saved] {args.out_csv}")
+    # Run regression
+    results = run_panel_reg(
+        panel,
+        entity_col=entity_col,
+        ret_prefix=ret_prefix,
+        signal_col=signal_col,
+        horizon_max=args.horizon_max,
+    )
+
+    # --------------------------------------------------
+    # Save clean filename
+    # --------------------------------------------------
+
+    fname = f"data/leadlag_{args.direction}"
+    if args.winsorize:
+        fname += "_winsor"
+    if args.nonzero:
+        fname += "_nonzero"
+    fname += ".csv"
+
+    results.to_csv(fname, index=False)
+    print(f"[saved] {fname}")
 
 if __name__ == "__main__":
     main()

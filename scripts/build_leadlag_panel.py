@@ -1,6 +1,7 @@
 # scripts/build_leadlag_panel.py
 # Usage:
-# python scripts/build_leadlag_panel.py --horizon_max 5 --min_edge_weight 0.0 --out data/leadlag_panel.parquet
+#   python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --min_edge_weight 0.0 --out data/leadlag_panel_forward.parquet
+#   python scripts/build_leadlag_panel.py --direction reverse --horizon_max 5 --min_edge_weight 0.0 --out data/leadlag_panel_reverse.parquet
 
 from __future__ import annotations
 
@@ -8,15 +9,16 @@ import argparse
 import numpy as np
 import pandas as pd
 
-BASE_DIR = "data"
+BASE_DIR = "src"
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_dir", type=str, default=BASE_DIR)
+    ap.add_argument("--direction", type=str, default="forward", choices=["forward", "reverse"])
     ap.add_argument("--horizon_max", type=int, default=5)
     ap.add_argument("--min_edge_weight", type=float, default=0.0)
     ap.add_argument("--use_logret", action="store_true")
-    ap.add_argument("--out", type=str, default="data/leadlag_panel.parquet")
+    ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
     HORIZON_MAX = args.horizon_max
@@ -119,45 +121,67 @@ def main():
     E_daily = pd.concat(out_chunks, ignore_index=True)
 
     # ----------------------------
-    # 7b) Aggregate customer pressure to supplier-day
+    # 8) Build panel: forward or reverse
     # ----------------------------
-    E_daily = E_daily.merge(cust_ret, on=["customer_gvkey", "date"], how="inner")
-    E_daily["term"] = E_daily["weight_wji"] * E_daily["cust_r"]
+    if args.direction == "forward":
+        # y_{i,t} = sum_j w_{j->i,t} * r_{j,t}
+        E_daily2 = E_daily.merge(cust_ret, on=["customer_gvkey", "date"], how="inner")
+        E_daily2["term"] = E_daily2["weight_wji"] * E_daily2["cust_r"]
 
-    y = (
-        E_daily.groupby(["supplier_gvkey", "date"], as_index=False)["term"].sum()
-        .rename(columns={"term": "y"})
-    )
+        sig = (
+            E_daily2.groupby(["supplier_gvkey", "date"], as_index=False)["term"].sum()
+            .rename(columns={"term": "y"})
+        )
 
-    # ----------------------------
-    # 8) Build final panel with horizons + lags
-    # ----------------------------
-    panel = sup_ret.merge(y, on=["supplier_gvkey", "date"], how="left")
-    panel["y"] = panel["y"].fillna(0.0)
-    panel = panel.sort_values(["supplier_gvkey", "date"])
+        panel = sup_ret.merge(sig, on=["supplier_gvkey", "date"], how="left")
+        panel["y"] = panel["y"].fillna(0.0)
+        panel = panel.sort_values(["supplier_gvkey", "date"])
 
-    for h in range(1, HORIZON_MAX + 1):
-        panel[f"sup_r_fwd_{h}"] = panel.groupby("supplier_gvkey")["sup_r"].shift(-h)
+        for h in range(1, HORIZON_MAX + 1):
+            panel[f"sup_r_fwd_{h}"] = panel.groupby("supplier_gvkey")["sup_r"].shift(-h)
+        for lag in [1, 2, 3, 4, 5]:
+            panel[f"sup_r_lag_{lag}"] = panel.groupby("supplier_gvkey")["sup_r"].shift(lag)
 
-    for lag in [1, 2, 3, 4, 5]:
-        panel[f"sup_r_lag_{lag}"] = panel.groupby("supplier_gvkey")["sup_r"].shift(lag)
+        panel = panel.dropna(subset=[f"sup_r_fwd_{h}" for h in range(1, HORIZON_MAX + 1)])
 
-    panel = panel.dropna(subset=[f"sup_r_fwd_{h}" for h in range(1, HORIZON_MAX + 1)])
+        # Save
+        panel.to_parquet(args.out, index=False)
+        print(f"[saved] {args.out}")
+        nrows, ncols = panel.shape
+        print(f"[panel:forward] shape=({nrows:,}, {ncols:,}) suppliers={panel['supplier_gvkey'].nunique():,} dates={panel['date'].nunique():,}")
+        print(panel["y"].describe())
+        print("std(y)=", float(panel["y"].std()))
+        print("mean(|y|)=", float(panel["y"].abs().mean()))
 
-    # ----------------------------
-    # 9) Save + lightweight summary
-    # ----------------------------
-    panel.to_parquet(args.out, index=False)
+    else:
+        # z_{j,t} = sum_i w_{j->i,t} * r_{i,t}
+        E_daily2 = E_daily.merge(sup_ret, on=["supplier_gvkey", "date"], how="inner")
+        E_daily2["term_rev"] = E_daily2["weight_wji"] * E_daily2["sup_r"]
 
-    print(f"[saved] {args.out}")
-    nrows, ncols = panel.shape
-    print(f"[panel] shape=({nrows:,}, {ncols:,}) "
-        f"suppliers={panel['supplier_gvkey'].nunique():,} "
-        f"dates={panel['date'].nunique():,}")
-    print(panel["y"].describe())
-    print("std(y)=", float(panel["y"].std()))
-    print("mean(|y|)=", float(panel["y"].abs().mean()))
-    print(panel.groupby("supplier_gvkey")["y"].count().describe())
+        sig = (
+            E_daily2.groupby(["customer_gvkey", "date"], as_index=False)["term_rev"].sum()
+            .rename(columns={"term_rev": "z"})
+        )
+
+        panel = cust_ret.merge(sig, on=["customer_gvkey", "date"], how="left")
+        panel["z"] = panel["z"].fillna(0.0)
+        panel = panel.sort_values(["customer_gvkey", "date"])
+
+        for h in range(1, HORIZON_MAX + 1):
+            panel[f"cust_r_fwd_{h}"] = panel.groupby("customer_gvkey")["cust_r"].shift(-h)
+        for lag in [1, 2, 3, 4, 5]:
+            panel[f"cust_r_lag_{lag}"] = panel.groupby("customer_gvkey")["cust_r"].shift(lag)
+
+        panel = panel.dropna(subset=[f"cust_r_fwd_{h}" for h in range(1, HORIZON_MAX + 1)])
+
+        # Save
+        panel.to_parquet(args.out, index=False)
+        print(f"[saved] {args.out}")
+        nrows, ncols = panel.shape
+        print(f"[panel:reverse] shape=({nrows:,}, {ncols:,}) customers={panel['customer_gvkey'].nunique():,} dates={panel['date'].nunique():,}")
+        print(panel["z"].describe())
+        print("std(z)=", float(panel["z"].std()))
+        print("mean(|z|)=", float(panel["z"].abs().mean()))
 
 if __name__ == "__main__":
     main()
