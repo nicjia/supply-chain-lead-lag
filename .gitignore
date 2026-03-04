@@ -5,3 +5,4 @@ parse.cpp
 probe.py
 src/
 *.parquet
+!merged_edges.csv

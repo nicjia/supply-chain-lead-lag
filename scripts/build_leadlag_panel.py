@@ -9,7 +9,7 @@ import argparse
 import numpy as np
 import pandas as pd
 
-BASE_DIR = "src"
+BASE_DIR = "data"
 
 def main():
     ap = argparse.ArgumentParser()
@@ -40,64 +40,43 @@ def main():
         ret["r"] = ret["RET"].astype(float)
 
     # ----------------------------
-    # 2) Load edges
+    # 2) Load edges (merged_edges.csv — customer_gvkey already resolved)
     # ----------------------------
-    edges = pd.read_csv(f"{args.base_dir}/output_edges.csv", parse_dates=["date"])
-    edges["date"] = pd.to_datetime(edges["date"]).dt.normalize()
+    edges = pd.read_csv("merged_edges.csv")
+    edges["date"] = pd.to_datetime(edges["srcdate"]).dt.normalize()
     edges["supplier_gvkey"] = edges["supplier_gvkey"].astype(str).str.zfill(6)
-    edges["customer_tic"] = edges["customer_tic"].astype(str).str.strip()
-    edges["weight_wji"] = edges["weight_wji"].astype(float)
+    # customer_gvkey stored as float in CSV (e.g. 2285.0); convert float→int→str→zfill
+    edges["customer_gvkey"] = (
+        pd.to_numeric(edges["customer_gvkey"], errors="coerce")
+        .astype("Int64")
+        .astype(str)
+        .str.zfill(6)
+    )
+    edges["weight_wji"] = pd.to_numeric(edges["weight_wji"], errors="coerce")
+
+    # Drop relationship-only edges (no dollar weight)
+    edges = edges.dropna(subset=["weight_wji"]).copy()
+
+    # Drop rows where customer_gvkey was not resolved
+    edges = edges[edges["customer_gvkey"].notna()
+                  & (edges["customer_gvkey"] != "nan")
+                  & (edges["customer_gvkey"] != "<NA>")
+                  & (edges["customer_gvkey"] != "00<NA>")].copy()
 
     if MIN_EDGE_WEIGHT is not None:
         edges = edges.loc[edges["weight_wji"].abs() >= float(MIN_EDGE_WEIGHT)].copy()
 
-    edges = edges.sort_values(["customer_tic", "supplier_gvkey", "date"])
+    edges = edges.sort_values(["customer_gvkey", "supplier_gvkey", "date"])
+    E0 = edges
 
     # ----------------------------
-    # 3) Load tic->gvkey translator (validity intervals)
-    # ----------------------------
-    link = pd.read_csv(f"{args.base_dir}/query3_translator.csv")
-    link["gvkey"] = link["gvkey"].astype(str).str.zfill(6)
-    link["tic"] = link["tic"].astype(str).str.strip()
-    link["LINKDT"] = pd.to_datetime(link["LINKDT"], errors="coerce")
-    link["LINKENDDT"] = link["LINKENDDT"].replace("E", "9999-12-31")
-    link["LINKENDDT"] = pd.to_datetime(link["LINKENDDT"], errors="coerce")
-
-    if "LINKTYPE" in link.columns:
-        link = link[link["LINKTYPE"].isin(["LU", "LC"])].copy()
-
-    # ----------------------------
-    # 4) Map customer_tic -> customer_gvkey on edge PIT dates
-    # ----------------------------
-    edge_dates = edges[["date", "customer_tic"]].drop_duplicates()
-    edge_dates = edge_dates.merge(link, left_on="customer_tic", right_on="tic", how="left")
-    edge_dates = edge_dates.loc[
-        (edge_dates["LINKDT"].notna()) &
-        (edge_dates["LINKENDDT"].notna()) &
-        (edge_dates["LINKDT"] <= edge_dates["date"]) &
-        (edge_dates["date"] <= edge_dates["LINKENDDT"])
-    ].copy()
-
-    if "LINKPRIM" in edge_dates.columns:
-        edge_dates["pref"] = (edge_dates["LINKPRIM"] == "P").astype(int)
-        edge_dates = edge_dates.sort_values(["date", "customer_tic", "pref"], ascending=[True, True, False])
-
-    cust_map = edge_dates.drop_duplicates(["date", "customer_tic"], keep="first")[["date", "customer_tic", "gvkey"]]
-    cust_map = cust_map.rename(columns={"gvkey": "customer_gvkey"})
-
-    # ----------------------------
-    # 5) Join edges -> customer gvkey (PIT)
-    # ----------------------------
-    E0 = edges.merge(cust_map, on=["date", "customer_tic"], how="inner")
-
-    # ----------------------------
-    # 6) Returns tables
+    # 3) Returns tables
     # ----------------------------
     cust_ret = ret[["gvkey", "date", "r"]].rename(columns={"gvkey": "customer_gvkey", "r": "cust_r"})
     sup_ret  = ret[["gvkey", "date", "r"]].rename(columns={"gvkey": "supplier_gvkey", "r": "sup_r"})
 
     # ----------------------------
-    # 7) Forward-fill PIT weights to trading dates per (customer_gvkey, supplier_gvkey)
+    # 4) Forward-fill PIT weights to trading dates per (customer_gvkey, supplier_gvkey)
     # ----------------------------
     pairs = E0[["customer_gvkey", "supplier_gvkey", "date", "weight_wji"]].copy()
     pairs = pairs.sort_values(["customer_gvkey", "supplier_gvkey", "date"])
@@ -121,7 +100,7 @@ def main():
     E_daily = pd.concat(out_chunks, ignore_index=True)
 
     # ----------------------------
-    # 8) Build panel: forward or reverse
+    # 5) Build panel: forward or reverse
     # ----------------------------
     if args.direction == "forward":
         # y_{i,t} = sum_j w_{j->i,t} * r_{j,t}

@@ -67,12 +67,12 @@ static std::string normalise(const std::string& s) {
     return out;
 }
 
-// Tokenise a normalised string into alpha-only words (splits on digit boundaries too).
+// Tokenise a normalised string into alphanumeric words (preserves digits like "3M", "7ELEVEN").
 static std::vector<std::string> tokenise(const std::string& norm) {
     std::vector<std::string> tokens;
     std::string cur;
     for (char c : norm) {
-        if (std::isalpha(static_cast<unsigned char>(c))) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
             cur += c;
         } else {
             if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
@@ -619,8 +619,8 @@ int main() {
     Timer total;
 
     // ----- File Paths -----
-    const std::string kFile1 = "file1.csv";                            // segments (raw edges)
-    const std::string kFile2 = "file2.csv";                            // metadata  (node dict)
+    const std::string kFile1 = "query1/file1.csv";                     // segments (raw edges)
+    const std::string kFile2 = "query1/file2.csv";                     // metadata  (node dict)
     const std::string kFile3 = "query1/yiay0c9gvy7mzn7n.csv";         // fundamentals (denom)
     const std::string kFile4 = "query1/syaj3hxumfqnozvb.csv";         // earnings dates
 

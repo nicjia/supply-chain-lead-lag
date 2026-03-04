@@ -1,2 +1,2 @@
-obs_maxeig=3.10179
-p_value=0.0609391
+obs_maxeig=3.16026
+p_value=0.0739261

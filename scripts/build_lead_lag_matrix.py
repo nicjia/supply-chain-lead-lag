@@ -71,71 +71,35 @@ def load_returns_wide_by_gvkey(returns_parquet: str) -> pd.DataFrame:
     return wide
 
 
-def load_link_table_query3(query3_csv: str) -> pd.DataFrame:
+def load_edges(edges_csv: str, source_filter: Optional[str] = None) -> pd.DataFrame:
     """
-    Expect columns like:
-    gvkey, tic, LINKDT, LINKENDDT, ... (others ignored)
+    Load merged_edges.csv.  customer_gvkey is already resolved.
+    Drops rows without a valid weight (relationship-only edges).
     """
-    lk = pd.read_csv(query3_csv)
-    lk["gvkey"] = lk["gvkey"].astype(str).str.zfill(6)
-    lk["tic"] = lk["tic"].astype(str)
-
-    lk["LINKDT"] = pd.to_datetime(lk["LINKDT"], errors="coerce")
-    lk["LINKENDDT"] = pd.to_datetime(lk["LINKENDDT"], errors="coerce")
-
-    # Treat missing LINKENDDT as "open-ended"
-    lk["LINKENDDT"] = lk["LINKENDDT"].fillna(pd.Timestamp("2099-12-31"))
-
-    # Basic cleanup
-    lk = lk.dropna(subset=["tic", "gvkey", "LINKDT", "LINKENDDT"]).copy()
-    return lk
-
-
-def resolve_customer_gvkey_asof(edges: pd.DataFrame, link: pd.DataFrame) -> pd.DataFrame:
-    """
-    Resolve customer_tic -> customer_gvkey using link intervals [LINKDT, LINKENDDT].
-    We do a merge then filter by interval membership. If multiple matches, pick the most recent LINKDT.
-    """
-    e = edges.copy()
-    e["date"] = pd.to_datetime(e["date"])
-    e["customer_tic"] = e["customer_tic"].astype(str)
-    e["supplier_gvkey"] = e["supplier_gvkey"].astype(str).str.zfill(6)
-
-    # merge on ticker
-    m = e.merge(link, left_on="customer_tic", right_on="tic", how="left", suffixes=("", "_lk"))
-
-    # interval filter: LINKDT <= edge_date <= LINKENDDT
-    ok = (m["LINKDT"] <= m["date"]) & (m["date"] <= m["LINKENDDT"])
-    m = m[ok].copy()
-
-    # if multiple links, choose the one with latest LINKDT (most specific)
-    m = m.sort_values(["customer_tic", "supplier_gvkey", "date", "LINKDT"])
-    m = m.groupby(["customer_tic", "supplier_gvkey", "date"], as_index=False).tail(1)
-
-    m = m.rename(columns={"gvkey": "customer_gvkey"})
-    m["customer_gvkey"] = m["customer_gvkey"].astype(str).str.zfill(6)
-
-    keep_cols = [
-        "date",
-        "customer_tic",
-        "customer_gvkey",
-        "supplier_tic",
-        "supplier_gvkey",
-        "weight_wji",
-        "match_tier",
-    ]
-    return m[keep_cols]
-
-
-def load_edges(edges_csv: str, tier_max: int = 1) -> pd.DataFrame:
     e = pd.read_csv(edges_csv)
-    e["date"] = pd.to_datetime(e["date"])
-    if "match_tier" in e.columns and tier_max is not None:
-        e = e[e["match_tier"] <= tier_max].copy()
+    e["date"] = pd.to_datetime(e["srcdate"])
+
+    if source_filter is not None and "source" in e.columns:
+        e = e[e["source"] == source_filter].copy()
 
     e["supplier_gvkey"] = e["supplier_gvkey"].astype(str).str.zfill(6)
+    # customer_gvkey stored as float in CSV (e.g. 2285.0); convert float→int→str→zfill
+    e["customer_gvkey"] = (
+        pd.to_numeric(e["customer_gvkey"], errors="coerce")
+        .astype("Int64")
+        .astype(str)
+        .str.zfill(6)
+    )
     e["weight_wji"] = pd.to_numeric(e["weight_wji"], errors="coerce")
+
+    # Drop rows without a weight (relationship-only edges with NaN salecs)
     e = e[np.isfinite(e["weight_wji"])].copy()
+
+    # Drop rows where customer_gvkey was not resolved
+    e = e[e["customer_gvkey"].notna()
+          & (e["customer_gvkey"] != "nan")
+          & (e["customer_gvkey"] != "<NA>")
+          & (e["customer_gvkey"] != "00<NA>")].copy()
     return e
 
 
@@ -243,30 +207,23 @@ def build_lead_lag_matrix_gvkey(
 
 def main():
     # ---- paths (edit if needed) ----
-    edges_csv = "src/output_edges.csv"
-    query3_csv = "src/query3_translator.csv"
-    returns_parquet = "src/returns_with_gvkey.parquet"
+    edges_csv = "merged_edges.csv"
+    returns_parquet = "data/returns_with_gvkey.parquet"
     outdir = Path("results/leadlag_stage2_gvkey")
     outdir.mkdir(parents=True, exist_ok=True)
 
     # ---- load ----
-    edges = load_edges(edges_csv, tier_max=1)
-    link = load_link_table_query3(query3_csv)
-    edges_resolved = resolve_customer_gvkey_asof(edges, link)
-
-    # keep only edges where customer_gvkey resolved
-    edges_resolved = edges_resolved.dropna(subset=["customer_gvkey"]).copy()
+    edges = load_edges(edges_csv)
 
     R = load_returns_wide_by_gvkey(returns_parquet)
 
-    print(f"[edges raw] {len(edges):,}")
-    print(f"[edges resolved] {len(edges_resolved):,} (after customer gvkey as-of resolution)")
+    print(f"[edges] {len(edges):,} (with valid weight & customer_gvkey)")
     print(f"[returns wide] {R.shape}")
 
     # ---- build matrix ----
     res = build_lead_lag_matrix_gvkey(
         returns_wide=R,
-        edges_resolved=edges_resolved,
+        edges_resolved=edges,
         horizon=1,
         min_obs=80,
         winsor_q=0.001,
