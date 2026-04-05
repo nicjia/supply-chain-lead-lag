@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rolling long–short backtest on real returns + merged edges (see supply_chain_leadlag.backtest)."""
+"""Rolling long–short backtest. Defaults: `config/backtest.yaml` (override with CLI flags)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
 import pandas as pd
 
-# Allow `python scripts/backtest_leadlag.py` without `pip install -e .`
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -17,68 +17,88 @@ if str(_ROOT) not in sys.path:
 from supply_chain_leadlag.backtest import comparison_metrics_table, run_rolling_comparison
 from supply_chain_leadlag.matrix import load_edges, load_returns_wide_by_gvkey
 from supply_chain_leadlag.signals import portfolio_metrics
+from supply_chain_leadlag.yaml_config import (
+    default_config_path,
+    flat_backtest_run_params,
+    load_yaml_config,
+    merge_backtest_cli,
+)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rolling lead–lag long–short backtest + baselines.")
-    ap.add_argument("--returns_parquet", default="data/returns_with_gvkey.parquet")
-    ap.add_argument("--edges_csv", default="data/merged_edges.csv")
-    ap.add_argument("--score", default="tstat_diff")
-    ap.add_argument("--rank_method", choices=["leadingness", "spectral"], default="leadingness")
-    ap.add_argument("--lookback_rows", type=int, default=504)
-    ap.add_argument("--rebalance_freq", default="BME", help="Pandas offset (BME = business month-end).")
-    ap.add_argument("--q", type=float, default=0.2, help="Top/bottom fraction for long–short legs.")
-    ap.add_argument("--min_obs", type=int, default=80)
-    ap.add_argument("--horizon", type=int, default=1)
-    ap.add_argument("--max_lag", type=int, default=5)
-    ap.add_argument("--momentum_window", type=int, default=20, help="Days for momentum baseline sum.")
-    ap.add_argument("--baseline_seed", type=int, default=0, help="RNG seed for random-rank baseline.")
-    ap.add_argument(
-        "--no_compare",
-        action="store_true",
-        help="Only run main strategy (skip baseline portfolios).",
-    )
-    ap.add_argument("--out_csv", default="results/backtest/daily_strategy.csv")
-    ap.add_argument("--out_summary", default="results/backtest/summary.json")
-    ap.add_argument(
-        "--out_comparison",
-        default="results/backtest/summary_comparison.csv",
-        help="Written when baselines are enabled.",
+    ap = argparse.ArgumentParser(
+        description="Rolling lead–lag long–short backtest + baselines. "
+        "See config/backtest.yaml for defaults; CLI overrides YAML.",
     )
     ap.add_argument(
-        "--max_rebalances",
-        type=int,
+        "--config",
         default=None,
-        help="Cap number of monthly rebalances (faster; full sample can be very slow on large edge lists).",
+        help="YAML file. If omitted, uses config/backtest.yaml when that file exists.",
     )
+    ap.add_argument("--returns_parquet", default=None)
+    ap.add_argument("--edges_csv", default=None)
+    ap.add_argument(
+        "--score",
+        default=None,
+        choices=["tstat_diff", "beta_diff", "cross_corr", "regression_r2", "granger", "levy"],
+    )
+    ap.add_argument(
+        "--rank_method",
+        default=None,
+        choices=["leadingness", "spectral", "cluster", "cluster_eigen"],
+    )
+    ap.add_argument("--n_clusters", type=int, default=None)
+    ap.add_argument("--cluster_random_state", type=int, default=None)
+    ap.add_argument("--lookback_rows", type=int, default=None)
+    ap.add_argument("--rebalance_freq", default=None)
+    ap.add_argument("--q", type=float, default=None)
+    ap.add_argument("--min_obs", type=int, default=None)
+    ap.add_argument("--horizon", type=int, default=None)
+    ap.add_argument("--max_lag", type=int, default=None)
+    ap.add_argument("--momentum_window", type=int, default=None)
+    ap.add_argument("--baseline_seed", type=int, default=None)
+    ap.add_argument("--no_compare", action="store_true")
+    ap.add_argument("--out_csv", default=None)
+    ap.add_argument("--out_summary", default=None)
+    ap.add_argument("--out_comparison", default=None)
+    ap.add_argument("--max_rebalances", type=int, default=None)
     args = ap.parse_args()
 
-    R = load_returns_wide_by_gvkey(args.returns_parquet)
-    edges = load_edges(args.edges_csv)
+    cfg_path = args.config or default_config_path(_ROOT)
+    cfg = load_yaml_config(cfg_path) if cfg_path else {}
+    flat = flat_backtest_run_params(cfg)
+    p = merge_backtest_cli(flat, args)
+
+    R = load_returns_wide_by_gvkey(p["returns_parquet"])
+    edges = load_edges(p["edges_csv"])
 
     print(f"[returns] {R.shape}  [edges] {len(edges):,} rows")
+    if cfg_path:
+        print(f"[config] {cfg_path}")
 
     comp = run_rolling_comparison(
         R,
         edges,
-        lookback_rows=args.lookback_rows,
-        rebalance_freq=args.rebalance_freq,
-        score=args.score,  # type: ignore[arg-type]
-        rank_method=args.rank_method,
-        q=args.q,
-        min_obs=args.min_obs,
-        horizon=args.horizon,
-        max_lag=args.max_lag,
-        max_rebalances=args.max_rebalances,
-        momentum_window=args.momentum_window,
-        baseline_seed=args.baseline_seed,
-        include_baselines=not args.no_compare,
+        lookback_rows=int(p["lookback_rows"]),
+        rebalance_freq=str(p["rebalance_freq"]),
+        score=p["score"],  # type: ignore[arg-type]
+        rank_method=p["rank_method"],  # type: ignore[arg-type]
+        n_clusters=int(p["n_clusters"]),
+        cluster_random_state=int(p["cluster_random_state"]),
+        q=float(p["q"]),
+        min_obs=int(p["min_obs"]),
+        horizon=int(p["horizon"]),
+        max_lag=int(p["max_lag"]),
+        max_rebalances=p["max_rebalances"],
+        momentum_window=int(p["momentum_window"]),
+        baseline_seed=int(p["baseline_seed"]),
+        include_baselines=bool(p.get("compare_baselines", True)),
     )
 
-    out_csv = Path(args.out_csv)
+    out_csv = Path(p["out_csv"])
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.no_compare:
+    if not p.get("compare_baselines", True):
         res = comp.main
         out = res.daily_ret.to_frame(name="main")
         out["cumulative"] = res.cumulative
@@ -87,8 +107,7 @@ def main():
             res.rebalance_log.to_csv(out_csv.parent / "rebalances.csv", index=False)
         summ = portfolio_metrics(res.daily_ret)
         summ["n_rebalances"] = int(len(res.rebalance_log))
-        out_summary = Path(args.out_summary)
-        out_summary.parent.mkdir(parents=True, exist_ok=True)
+        out_summary = Path(p["out_summary"])
 
         def _json_val(v):
             if hasattr(v, "item"):
@@ -97,6 +116,7 @@ def main():
                 return v
             return str(v)
 
+        out_summary.parent.mkdir(parents=True, exist_ok=True)
         with open(out_summary, "w") as f:
             json.dump({k: _json_val(v) for k, v in summ.items()}, f, indent=2)
         print(json.dumps(summ, indent=2))
@@ -117,7 +137,7 @@ def main():
         comp.main.rebalance_log.to_csv(out_csv.parent / "rebalances.csv", index=False)
 
     table = comparison_metrics_table(comp)
-    out_cmp = Path(args.out_comparison)
+    out_cmp = Path(p["out_comparison"])
     out_cmp.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(out_cmp, index=False)
 
@@ -131,7 +151,7 @@ def main():
             return v
         return str(v)
 
-    out_summary = Path(args.out_summary)
+    out_summary = Path(p["out_summary"])
     out_summary.parent.mkdir(parents=True, exist_ok=True)
     with open(out_summary, "w") as f:
         json.dump({k: _json_val(v) for k, v in summ_main.items()}, f, indent=2)

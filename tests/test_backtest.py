@@ -95,3 +95,23 @@ def test_grid_search_smoke():
     )
     assert "sharpe" in df.columns
     assert df.iloc[0]["score"] == "cross_corr"
+
+
+def test_run_rolling_cluster_rank_smoke():
+    R = _synth_panel()
+    e = _synth_edges([f"{i:06d}" for i in range(1, 16)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    res = run_rolling_long_short(
+        R,
+        e,
+        lookback_rows=120,
+        rebalance_freq="BQE",
+        score="cross_corr",
+        rank_method="cluster",
+        n_clusters=3,
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        max_rebalances=2,
+    )
+    assert len(res.daily_ret) == len(R)

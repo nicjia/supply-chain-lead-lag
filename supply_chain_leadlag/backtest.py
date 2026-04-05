@@ -16,7 +16,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from supply_chain_leadlag.global_structure import global_rank_spectral_df
+from supply_chain_leadlag.global_structure import cluster_rank_series, global_rank_spectral_df
 from supply_chain_leadlag.matrix import (
     EdgeScoreMethod,
     LeadLagResult,
@@ -38,13 +38,43 @@ def returns_window(R: pd.DataFrame, end: pd.Timestamp, n_rows: int) -> pd.DataFr
     return sub.iloc[-n_rows:].copy()
 
 
+RankMethod = Literal["leadingness", "spectral", "cluster", "cluster_eigen"]
+
+
 def scores_from_result(
     res: LeadLagResult,
-    method: Literal["leadingness", "spectral"] = "leadingness",
+    method: RankMethod = "leadingness",
+    *,
+    n_clusters: int = 4,
+    cluster_random_state: int = 0,
 ) -> pd.Series:
+    """
+    Turn estimated C into a cross-sectional score per node.
+
+    - **leadingness:** row-sum of S = C − Cᵀ (local net “lead” from skew part).
+    - **spectral:** GlobalRank — leading eigenvector of H = i(C − Cᵀ).
+    - **cluster:** MetaCluster + ClusterRank with local row-sums inside clusters.
+    - **cluster_eigen:** same clusters, local spectral rank within each cluster.
+    """
     if method == "leadingness":
         return res.leadingness.sort_index()
-    return global_rank_spectral_df(res.C).sort_index()
+    if method == "spectral":
+        return global_rank_spectral_df(res.C).sort_index()
+    if method == "cluster":
+        return cluster_rank_series(
+            res.C,
+            local="row_sum",
+            n_clusters=n_clusters,
+            random_state=cluster_random_state,
+        ).sort_index()
+    if method == "cluster_eigen":
+        return cluster_rank_series(
+            res.C,
+            local="eigen",
+            n_clusters=n_clusters,
+            random_state=cluster_random_state,
+        ).sort_index()
+    raise ValueError(f"Unknown rank_method {method!r}")
 
 
 def momentum_scores(R_win: pd.DataFrame, window: int) -> pd.Series:
@@ -175,7 +205,9 @@ def run_rolling_comparison(
     lookback_rows: int = 504,
     rebalance_freq: str = "BME",
     score: EdgeScoreMethod = "tstat_diff",
-    rank_method: Literal["leadingness", "spectral"] = "leadingness",
+    rank_method: RankMethod = "leadingness",
+    n_clusters: int = 4,
+    cluster_random_state: int = 0,
     q: float = 0.2,
     long_high: bool = True,
     min_obs: int = 80,
@@ -230,7 +262,12 @@ def run_rolling_comparison(
         except ValueError:
             continue
 
-        sc = scores_from_result(res, method=rank_method)
+        sc = scores_from_result(
+            res,
+            method=rank_method,
+            n_clusters=n_clusters,
+            cluster_random_state=cluster_random_state,
+        )
         w_main = long_short_weights(sc, q=q, long_high=long_high)
         if w_main.empty or w_main.abs().sum() == 0:
             continue
@@ -291,7 +328,9 @@ def run_rolling_long_short(
     lookback_rows: int = 504,
     rebalance_freq: str = "BME",
     score: EdgeScoreMethod = "tstat_diff",
-    rank_method: Literal["leadingness", "spectral"] = "leadingness",
+    rank_method: RankMethod = "leadingness",
+    n_clusters: int = 4,
+    cluster_random_state: int = 0,
     q: float = 0.2,
     long_high: bool = True,
     min_obs: int = 80,
@@ -309,6 +348,8 @@ def run_rolling_long_short(
         rebalance_freq=rebalance_freq,
         score=score,
         rank_method=rank_method,
+        n_clusters=n_clusters,
+        cluster_random_state=cluster_random_state,
         q=q,
         long_high=long_high,
         min_obs=min_obs,
@@ -357,13 +398,13 @@ def grid_search_main_backtest(
     edges: pd.DataFrame,
     *,
     scores: list[str] | None = None,
-    rank_methods: list[Literal["leadingness", "spectral"]] | None = None,
+    rank_methods: list[str] | None = None,
     **kwargs,
 ) -> pd.DataFrame:
-    """
-    Sweep **(A)** how each directed edge is scored when building \(C\) (`score` in
-    :func:`build_lead_lag_matrix_gvkey`) × **(B)** how node scores are derived from \(C\)
-    (`rank_method`: row-sum leadingness vs spectral GlobalRank).
+    r"""
+    Sweep (A) edge scoring for C (`score` in `build_lead_lag_matrix_gvkey`) × (B) global
+    ranking from C: `leadingness`, `spectral` (GlobalRank), `cluster`, `cluster_eigen`
+    (MetaCluster + ClusterRank; pass `n_clusters` / `cluster_random_state` in kwargs).
 
     Each cell runs a full rolling backtest (main leg only) and records `portfolio_metrics`.
     Use `max_rebalances` in `kwargs` to cap cost while searching.
@@ -371,6 +412,8 @@ def grid_search_main_backtest(
     Returns a DataFrame sorted by Sharpe descending (failed rows last).
     """
     from supply_chain_leadlag.signals import portfolio_metrics
+
+    valid_rank: tuple[str, ...] = ("leadingness", "spectral", "cluster", "cluster_eigen")
 
     if scores is None:
         scores = list(DEFAULT_SCORE_GRID)
@@ -380,9 +423,9 @@ def grid_search_main_backtest(
     rows: list[dict] = []
     for score in scores:
         for rank_method in rank_methods:
-            rm: Literal["leadingness", "spectral"] = (
-                rank_method if rank_method in ("leadingness", "spectral") else "leadingness"
-            )
+            if rank_method not in valid_rank:
+                raise ValueError(f"rank_method must be one of {valid_rank}, got {rank_method!r}")
+            rm: RankMethod = rank_method  # type: ignore[assignment]
             try:
                 comp = run_rolling_comparison(
                     R,

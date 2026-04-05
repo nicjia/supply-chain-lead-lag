@@ -6,6 +6,7 @@ Unified framework for **network-based lead–lag** between statistical return pr
 
 | Path | Purpose |
 |------|---------|
+| `config/backtest.yaml` | Optional central defaults for backtest/grid (paths, matrix, ranking, outputs, grid); CLI overrides YAML |
 | `supply_chain_leadlag/` | Package: `matrix` (data loaders + \(C\)), `pairwise`, `global_structure` (spectrum + rankings), `signals` (signals + portfolio metrics), `backtest` (rolling long–short) |
 | `data/merged_edges.csv` (or `merged_edges.csv`) | Point-in-time edges: `weight_wji`, `supplier_gvkey`, resolved `customer_gvkey` |
 | `data/returns_with_gvkey.parquet` | Daily returns (`RET`) by `gvkey` |
@@ -25,7 +26,22 @@ pip install -e ".[dev]"
 pip install linearmodels
 ```
 
-From the repo root you can also run `python scripts/backtest_leadlag.py` (and the other `supply_chain_leadlag`-importing scripts) **without** installing the package: those scripts add the project root to `sys.path`. For `pytest` or `import supply_chain_leadlag` in arbitrary directories, use `pip install -e .` or `PYTHONPATH=.`.
+From the repo root you can also run `python scripts/backtest_leadlag.py` (and the other `supply_chain_leadlag`-importing scripts) **without** installing the package: those scripts add the project root to `sys.path`. For `pytest` or `import supply_chain_leadlag` in arbitrary directories, use `pip install -e .` or `PYTHONPATH=.` (the package lists `pyyaml` so YAML config works after install).
+
+## Configuration (`config/backtest.yaml`)
+
+`scripts/backtest_leadlag.py` and `scripts/grid_backtest.py` load **`config/backtest.yaml`** from the repo root when it exists. Pass **`--config /path/to/file.yaml`** to use another file, or omit the file to rely on code defaults only. YAML support comes from the **PyYAML** distribution on PyPI (`pip install pyyaml` or `pip install -e .`); do not run `pip install yaml`—that is a different, unrelated name.
+
+**Precedence:** CLI flags override YAML; anything not set in either uses the script’s built-in defaults (see `supply_chain_leadlag.yaml_config.flat_backtest_run_params`).
+
+| Section | Role |
+|---------|------|
+| `paths` | `returns_parquet`, `edges_csv` |
+| `matrix` | `score`, `horizon`, `max_lag`, `min_obs` |
+| `ranking` | `rank_method`, `n_clusters`, `cluster_random_state` |
+| `backtest` | `lookback_rows`, `rebalance_freq`, `q`, `max_rebalances`, `compare_baselines`, `momentum_window`, `baseline_seed` |
+| `outputs` | `daily_csv`, `summary_json`, `comparison_csv` |
+| `grid` | (grid script only) `scores`, `rank_methods`, `out_csv` |
 
 ## Quick pipeline
 
@@ -80,7 +96,7 @@ Interpretation: **main** should beat **random** if the signal is not just noise;
 | Axis | Code | Options |
 |------|------|--------|
 | **Edge score → \(C\)** | `build_lead_lag_matrix_gvkey(..., score=...)` | `tstat_diff`, `beta_diff`, `cross_corr`, `regression_r2`, `granger`, `levy` |
-| **Global rank from \(C\)** | `scores_from_result(..., rank_method=...)` | `leadingness` (row-sum of \(S\)), `spectral` (leading eigenvector of \(H=i(C-C^\top)\)) |
+| **Global / local rank from \(C\)** | `scores_from_result(..., rank_method=...)` | `leadingness` (row-sum of \(S\)); `spectral` (GlobalRank on \(H=iS\)); `cluster` / `cluster_eigen` (MetaCluster + ClusterRank — local row-sum or local spectral inside clusters). Use `n_clusters`, `cluster_random_state`. |
 
 Defaults in `backtest_leadlag.py`: `score=tstat_diff`, `rank_method=leadingness`. Baselines (**structural**, **random**, etc.) do not vary these; they are fixed comparators.
 
@@ -91,6 +107,7 @@ Run a **main-leg-only** sweep (sorted by Sharpe in the CSV). Use a small `--max_
 ```bash
 python scripts/grid_backtest.py --max_rebalances 8 --out_csv results/backtest/grid_main.csv
 python scripts/grid_backtest.py --scores tstat_diff,cross_corr,levy --rank_methods leadingness,spectral --max_rebalances 12
+python scripts/grid_backtest.py --rank_methods leadingness,spectral,cluster,cluster_eigen --n_clusters 6 --max_rebalances 8
 ```
 
 Or in Python: `grid_search_main_backtest(R, edges, max_rebalances=12)`.

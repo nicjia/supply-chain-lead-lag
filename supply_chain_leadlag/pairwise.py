@@ -9,12 +9,20 @@ import numpy as np
 
 
 def _corr(x: np.ndarray, y: np.ndarray) -> float:
-    x = x - np.nanmean(x)
-    y = y - np.nanmean(y)
-    d = np.nanstd(x) * np.nanstd(y)
-    if d <= 0 or np.isnan(d):
+    """Pearson corr on overlapping finite pairs only (avoids nanmean/nanstd on empty slices)."""
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 2:
         return np.nan
-    return float(np.nanmean(x * y) / d)
+    xv = x[ok].astype(float, copy=False)
+    yv = y[ok].astype(float, copy=False)
+    xv = xv - np.mean(xv)
+    yv = yv - np.mean(yv)
+    sx = float(np.std(xv, ddof=0))
+    sy = float(np.std(yv, ddof=0))
+    d = sx * sy
+    if d <= 0 or not np.isfinite(d):
+        return np.nan
+    return float(np.mean(xv * yv) / d)
 
 
 def leadlag_score_regression(

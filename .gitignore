@@ -1,3 +1,8 @@
+# Python bytecode (any directory named __pycache__)
+__pycache__/
+*.py[cod]
+*$py.class
+
 *.csv
 results/backtest/
 .DS_Store

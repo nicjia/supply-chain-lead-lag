@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from sklearn.cluster import SpectralClustering
@@ -64,6 +66,12 @@ def global_rank_spectral_df(C: pd.DataFrame) -> pd.Series:
 
 
 def meta_cluster_labels(C: np.ndarray, n_clusters: int = 4, random_state: int = 0) -> np.ndarray:
+    """
+    **MetaCluster** (not industry): partition the *same nodes* as in the lead–lag matrix `C`
+    using sklearn `SpectralClustering` on the nonnegative affinity
+    ``A = |C| + |C.T|`` (diagonal zeroed). So clusters are **endogenous** to the estimated
+    directed lead–lag strengths at that rebalance—not GICS/NAICS.
+    """
     C = np.asarray(C, dtype=float)
     n = C.shape[0]
     if n <= 1:
@@ -74,14 +82,37 @@ def meta_cluster_labels(C: np.ndarray, n_clusters: int = 4, random_state: int = 
     A_min = A.min()
     if A_min < 0:
         A = A - A_min
+    # Spectral embedding warns (and is ill-posed) if the graph is disconnected. Add a
+    # tiny weight only on zero off-diagonals so the support is connected without shifting positive edges.
+    off = ~np.eye(n, dtype=bool)
+    scale = float(np.max(A)) if np.max(A) > 0 else 1.0
+    eps = max(np.finfo(float).eps * 1e3, 1e-12 * scale)
+    A = A.copy()
+    A[off] = np.where(A[off] > 0, A[off], eps)
+    # Prefer ARPACK; sklearn may fall back to LOBPCG internally on ill-conditioned Laplacians.
     sc = SpectralClustering(
         n_clusters=k,
         affinity="precomputed",
         random_state=random_state,
         assign_labels="kmeans",
+        eigen_solver="arpack",
     )
     try:
-        return sc.fit_predict(A)
+        # ARPACK can fall back to LOBPCG inside sklearn; LOBPCG then warns about early exit
+        # vs tolerance (~1e-6). Embedding is still fine—only suppress those messages.
+        with warnings.catch_warnings():
+            for pat in (
+                r".*not reaching the requested tolerance.*",
+                r".*Exited at iteration.*",
+                r".*Exited postprocessing.*",
+            ):
+                warnings.filterwarnings(
+                    "ignore",
+                    message=pat,
+                    category=UserWarning,
+                    module=r"sklearn\.manifold\._spectral_embedding",
+                )
+            return sc.fit_predict(A)
     except Exception:
         return np.zeros(n, dtype=int)
 
@@ -122,6 +153,14 @@ def cluster_rank_scores(C: np.ndarray, labels: np.ndarray, local: str = "row_sum
 
 
 def cluster_rank_series(C: pd.DataFrame, **kwargs) -> pd.Series:
-    labels = meta_cluster_labels(C.to_numpy(dtype=float), **kwargs)
-    s = cluster_rank_scores(C.to_numpy(dtype=float), labels)
+    """
+    ClusterRank: spectral clusters on |C|+|C'|, then local rank within cluster + cluster net flow.
+
+    Pass ``local='row_sum'`` (default) or ``local='eigen'`` for local spectral rank inside each cluster.
+    Remaining ``kwargs`` go to :func:`meta_cluster_labels` (e.g. ``n_clusters``, ``random_state``).
+    """
+    kw = dict(kwargs)
+    local = kw.pop("local", "row_sum")
+    labels = meta_cluster_labels(C.to_numpy(dtype=float), **kw)
+    s = cluster_rank_scores(C.to_numpy(dtype=float), labels, local=local)
     return pd.Series(s, index=C.index, name="cluster_rank")

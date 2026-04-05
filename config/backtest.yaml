@@ -1,0 +1,41 @@
+# Central defaults for backtest + grid scripts (override with CLI flags).
+# Paths are relative to the repo root when you run scripts from there.
+
+paths:
+  returns_parquet: data/returns_with_gvkey.parquet
+  edges_csv: data/merged_edges.csv
+
+# How each supply-chain edge is scored into C (see build_lead_lag_matrix_gvkey).
+matrix:
+  score: tstat_diff
+  horizon: 1
+  max_lag: 5
+  min_obs: 80
+
+# How node scores are derived from C (see scores_from_result).
+ranking:
+  rank_method: leadingness
+  n_clusters: 4
+  cluster_random_state: 0
+
+backtest:
+  lookback_rows: 504
+  rebalance_freq: BME
+  q: 0.2
+  max_rebalances: null
+  compare_baselines: true
+  momentum_window: 20
+  baseline_seed: 0
+
+outputs:
+  daily_csv: results/backtest/daily_strategy.csv
+  summary_json: results/backtest/summary.json
+  comparison_csv: results/backtest/summary_comparison.csv
+
+# Used by scripts/grid_backtest.py when --config points here (section grid).
+grid:
+  scores: null
+  rank_methods:
+    - leadingness
+    - spectral
+  out_csv: results/backtest/grid_main.csv
