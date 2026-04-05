@@ -1,4 +1,5 @@
 *.csv
+results/backtest/
 .DS_Store
 pipeline
 parse.cpp

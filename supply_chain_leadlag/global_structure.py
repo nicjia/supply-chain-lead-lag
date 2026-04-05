@@ -1,0 +1,127 @@
+"""GlobalRank (spectral), MetaCluster, ClusterRank, Hermitian spectrum / permutation tests."""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from sklearn.cluster import SpectralClustering
+
+
+def hermitian_from_skew(S: np.ndarray) -> np.ndarray:
+    return 1j * np.asarray(S, dtype=float)
+
+
+def eigendecompose_hermitian(A: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    w, V = np.linalg.eigh(A)
+    idx = np.argsort(w)[::-1]
+    return w[idx], V[:, idx]
+
+
+def _permute_skew_upper_triangle(S: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    n = S.shape[0]
+    iu = np.triu_indices(n, k=1)
+    vals = S[iu].copy()
+    rng.shuffle(vals)
+    Snull = np.zeros_like(S, dtype=float)
+    Snull[iu] = vals
+    Snull[(iu[1], iu[0])] = -vals
+    return Snull
+
+
+def permutation_test_max_eig(
+    S: np.ndarray,
+    *,
+    n_perm: int = 500,
+    seed: int = 0,
+) -> tuple[float, float, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    obs_maxeig = float(np.max(np.linalg.eigvalsh(hermitian_from_skew(S))).real)
+    null_maxeig = np.empty(n_perm, dtype=float)
+    for b in range(n_perm):
+        Snull = _permute_skew_upper_triangle(S, rng)
+        null_maxeig[b] = float(np.max(np.linalg.eigvalsh(hermitian_from_skew(Snull))).real)
+    pval = (1.0 + np.sum(null_maxeig >= obs_maxeig)) / (n_perm + 1.0)
+    return obs_maxeig, float(pval), null_maxeig
+
+
+def global_rank_spectral_from_C(C: np.ndarray) -> np.ndarray:
+    """Leading eigenvector scores of H = i(C − Cᵀ)."""
+    C = np.asarray(C, dtype=float)
+    S = C - C.T
+    H = hermitian_from_skew(S)
+    _, V = np.linalg.eigh(H)
+    v = V[:, -1]
+    s = np.real(v)
+    if np.nanmax(np.abs(s)) < 1e-10:
+        s = np.abs(v)
+    return s
+
+
+def global_rank_spectral_df(C: pd.DataFrame) -> pd.Series:
+    idx = list(C.index)
+    scores = global_rank_spectral_from_C(C.to_numpy(dtype=float))
+    return pd.Series(scores, index=idx, name="global_rank_spectral")
+
+
+def meta_cluster_labels(C: np.ndarray, n_clusters: int = 4, random_state: int = 0) -> np.ndarray:
+    C = np.asarray(C, dtype=float)
+    n = C.shape[0]
+    if n <= 1:
+        return np.zeros(n, dtype=int)
+    k = min(n_clusters, n)
+    A = np.abs(C) + np.abs(C.T)
+    np.fill_diagonal(A, 0.0)
+    A_min = A.min()
+    if A_min < 0:
+        A = A - A_min
+    sc = SpectralClustering(
+        n_clusters=k,
+        affinity="precomputed",
+        random_state=random_state,
+        assign_labels="kmeans",
+    )
+    try:
+        return sc.fit_predict(A)
+    except Exception:
+        return np.zeros(n, dtype=int)
+
+
+def cluster_flow_matrix(C: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    labs = np.asarray(labels, dtype=int)
+    k = int(labs.max()) + 1
+    F = np.zeros((k, k), dtype=float)
+    for i in range(C.shape[0]):
+        for j in range(C.shape[1]):
+            F[labs[i], labs[j]] += C[i, j]
+    return F
+
+
+def cluster_net_influence(F: np.ndarray) -> np.ndarray:
+    return F.sum(axis=1) - F.sum(axis=0)
+
+
+def cluster_rank_scores(C: np.ndarray, labels: np.ndarray, local: str = "row_sum") -> np.ndarray:
+    n = C.shape[0]
+    labs = np.asarray(labels, dtype=int)
+    scores = np.zeros(n, dtype=float)
+    F = cluster_flow_matrix(C, labs)
+    net = cluster_net_influence(F)
+    uniq = np.unique(labs)
+    for c in uniq:
+        idx = np.where(labs == c)[0]
+        sub = C[np.ix_(idx, idx)]
+        if local == "row_sum":
+            local_s = sub.sum(axis=1)
+        elif local == "eigen":
+            local_s = global_rank_spectral_from_C(sub) if sub.size else np.zeros(len(idx))
+        else:
+            raise ValueError("local must be 'row_sum' or 'eigen'")
+        local_s = local_s - np.nanmean(local_s)
+        scores[idx] = local_s + net[c]
+    return scores
+
+
+def cluster_rank_series(C: pd.DataFrame, **kwargs) -> pd.Series:
+    labels = meta_cluster_labels(C.to_numpy(dtype=float), **kwargs)
+    s = cluster_rank_scores(C.to_numpy(dtype=float), labels)
+    return pd.Series(s, index=C.index, name="cluster_rank")

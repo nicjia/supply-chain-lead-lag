@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from supply_chain_leadlag.global_structure import (
+    eigendecompose_hermitian,
+    hermitian_from_skew,
+    permutation_test_max_eig,
+)
 
 '''
 Run: 
@@ -32,70 +36,6 @@ def _ensure_square_same_index(S: pd.DataFrame) -> pd.DataFrame:
     S.index = S.index.map(str)
     S.columns = S.columns.map(str)
     return S.reindex(index=nodes, columns=nodes, fill_value=0.0)
-
-
-def hermitian_from_skew(S: np.ndarray) -> np.ndarray:
-    """
-    For real skew-symmetric S, define Hermitian adjacency:
-        A_tilde = i * S
-    This is Hermitian => real eigenvalues; use eigh/eigvalsh.
-    """
-    return 1j * S.astype(float, copy=False)
-
-
-def eigendecompose_hermitian(A: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Eigendecompose Hermitian A using eigh:
-      returns (eigvals_desc, eigvecs_desc) with eigvecs as columns.
-    """
-    w, V = np.linalg.eigh(A)  # ascending
-    idx = np.argsort(w)[::-1]
-    return w[idx], V[:, idx]
-
-
-def _permute_skew_upper_triangle(S: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """
-    Permute the upper-triangular entries of S (excluding diagonal), then antisymmetrize.
-
-    Produces a skew-symmetric matrix with the same multiset of upper-tri values,
-    but randomized across node pairs.
-    """
-    n = S.shape[0]
-    iu = np.triu_indices(n, k=1)
-    vals = S[iu].copy()
-    rng.shuffle(vals)
-
-    Snull = np.zeros_like(S, dtype=float)
-    Snull[iu] = vals
-    Snull[(iu[1], iu[0])] = -vals
-    return Snull
-
-
-def permutation_test_max_eig(
-    S: np.ndarray,
-    *,
-    n_perm: int = 500,
-    seed: int = 0,
-) -> Tuple[float, float, np.ndarray]:
-    """
-    Permutation test using statistic lambda_max(A_tilde), where A_tilde = iS.
-
-    Returns: (obs_maxeig, p_value, null_maxeig_array)
-    """
-    rng = np.random.default_rng(seed)
-
-    # observed
-    obs_maxeig = float(np.max(np.linalg.eigvalsh(hermitian_from_skew(S))).real)
-
-    # null
-    null_maxeig = np.empty(n_perm, dtype=float)
-    for b in range(n_perm):
-        Snull = _permute_skew_upper_triangle(S, rng)
-        null_maxeig[b] = float(np.max(np.linalg.eigvalsh(hermitian_from_skew(Snull))).real)
-
-    # right-tail p-value with +1 smoothing
-    pval = (1.0 + np.sum(null_maxeig >= obs_maxeig)) / (n_perm + 1.0)
-    return obs_maxeig, float(pval), null_maxeig
 
 
 def _plot_scree(eigvals: np.ndarray, outpath: Path, top_k: int = 50) -> None:

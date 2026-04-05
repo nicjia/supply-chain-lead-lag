@@ -1,26 +1,45 @@
-import pandas as pd
+"""Plot horizon profile from run_leadlag_tests CSV output."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
-# Load results (baseline or conditional)
-df = pd.read_csv("data/leadlag_win_nonzeroy_horizon_results.csv")
 
-h = df["h"]
-beta = df["beta_y"]
-se = df["se_y"]
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", type=str, required=True, help="CSV with columns h, beta, se (or beta_y, se_y)")
+    ap.add_argument("--out", type=str, default="figures/leadlag_horizon.png")
+    args = ap.parse_args()
 
-ci_upper = beta + 1.96 * se
-ci_lower = beta - 1.96 * se
+    df = pd.read_csv(args.csv)
+    if "beta_y" in df.columns:
+        h, beta, se = df["h"], df["beta_y"], df["se_y"]
+    else:
+        h, beta, se = df["h"], df["beta"], df["se"]
 
-plt.figure(figsize=(6,4))
-plt.plot(h, beta, marker='o')
-plt.fill_between(h, ci_lower, ci_upper, alpha=0.2)
+    ci_upper = beta + 1.96 * se
+    ci_lower = beta - 1.96 * se
 
-plt.axhline(0, linestyle='--')
-plt.xlabel("Horizon (days)")
-plt.ylabel(r"$\hat{\beta}_h$")
-plt.title("Supply-Chain Lead–Lag (Winsorized & Nonzero $y$)")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-plt.tight_layout()
-plt.savefig("figures/leadlag_win_nonzeroy_horizon_results.png", dpi=300)
-plt.close()
+    plt.figure(figsize=(6, 4))
+    plt.plot(h, beta, marker="o")
+    plt.fill_between(h, ci_lower, ci_upper, alpha=0.2)
+    plt.axhline(0, linestyle="--")
+    plt.xlabel("Horizon (days)")
+    plt.ylabel(r"$\hat{\beta}_h$")
+    plt.title("Lead–lag horizon profile")
+    plt.tight_layout()
+    plt.savefig(out, dpi=300)
+    plt.close()
+    print(f"[saved] {out}")
+
+
+if __name__ == "__main__":
+    main()
