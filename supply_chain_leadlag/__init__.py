@@ -1,9 +1,14 @@
 """Supply chain lead–lag: matrices, global rankings, signals, metrics, backtests."""
 
 from supply_chain_leadlag.backtest import (
+    DEFAULT_SCORE_GRID,
     BacktestResult,
+    ComparisonResult,
+    comparison_metrics_table,
     filter_edges_pit,
+    grid_search_main_backtest,
     long_short_weights,
+    run_rolling_comparison,
     run_rolling_long_short,
     scores_from_result,
 )
@@ -54,8 +59,13 @@ __all__ = [
     "predictability_ols",
     "structural_summary",
     "BacktestResult",
+    "ComparisonResult",
+    "comparison_metrics_table",
+    "DEFAULT_SCORE_GRID",
+    "grid_search_main_backtest",
     "filter_edges_pit",
     "long_short_weights",
+    "run_rolling_comparison",
     "run_rolling_long_short",
     "scores_from_result",
 ]

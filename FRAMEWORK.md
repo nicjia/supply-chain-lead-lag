@@ -50,7 +50,7 @@ Hermitian spectrum and permutation tests on \(\lambda_{\max}(iS)\): `supply_chai
 ### Step 4: Evaluation
 
 - **Predictability:** panel regressions with firm and time effects — `scripts/run_leadlag_tests.py` (requires optional `linearmodels`).
-- **Portfolio / univariate:** Sharpe, drawdown — `supply_chain_leadlag.signals.portfolio_metrics`; rolling long–short — `supply_chain_leadlag.backtest`.
+- **Portfolio / univariate:** Sharpe, drawdown — `portfolio_metrics`; rolling long–short — `run_rolling_long_short` / `run_rolling_comparison` with baselines (**random** ranks, **momentum**, **structural** weights-only, **equal_weight** long-only) — `scripts/backtest_leadlag.py`, `comparison_metrics_table`.
 - **Structural:** \(\lambda_{\max}(H)\), Frobenius norm — `structural_summary`; compare \(C^{\text{data}}\) vs \(C^{\text{supply}}\) — `matrix_compare_frobenius`.
 
 ---

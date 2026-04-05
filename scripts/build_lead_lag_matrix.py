@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from supply_chain_leadlag.matrix import build_lead_lag_matrix_gvkey, load_edges, load_returns_wide_by_gvkey
 

@@ -24,13 +24,14 @@ Unified framework for **network-based lead–lag** between statistical return pr
 
 | Path | Purpose |
 |------|---------|
-| `supply_chain_leadlag/` | Installable package: matrices \(C, S\), spectral GlobalRank, clustering, hybrid / multi-hop signals, evaluation helpers |
+| `supply_chain_leadlag/` | Package: `matrix` (data loaders + \(C\)), `pairwise`, `global_structure` (spectrum + rankings), `signals` (signals + portfolio metrics), `backtest` (rolling long–short) |
 | `merged_edges.csv` | Point-in-time edges: `weight_wji`, `supplier_gvkey`, resolved `customer_gvkey` |
 | `data/returns_with_gvkey.parquet` | Daily returns (`RET`) by `gvkey` |
 | `scripts/build_lead_lag_matrix.py` | Build **data-driven** \(C\) on edges (forward vs reverse regression asymmetry × weight) → `results/leadlag_stage2_gvkey/` |
 | `scripts/build_leadlag_panel.py` | Build **structural** signal panel \(y_{i,t} = \sum_j w_{j\to i,t} r_{j,t}\) for econometric tests |
 | `scripts/run_leadlag_tests.py` | Panel regressions (needs `linearmodels`) |
 | `scripts/spectral_analysis.py` | Spectrum of \(H=iS\), optional permutation test for \(\lambda_{\max}\) |
+| `scripts/backtest_leadlag.py` | **Rolling** PIT long–short on real returns + edges → CSV + JSON summary |
 
 ## Install
 
@@ -41,12 +42,15 @@ pip install -e ".[dev]"
 pip install linearmodels
 ```
 
+From the repo root you can also run `python scripts/backtest_leadlag.py` (and the other `supply_chain_leadlag`-importing scripts) **without** installing the package: those scripts add the project root to `sys.path`. For `pytest` or `import supply_chain_leadlag` in arbitrary directories, use `pip install -e .` or `PYTHONPATH=.`.
+
 ## Quick pipeline
 
-1. **Lead–lag matrix (full sample, edge-level scores):**
+1. **Lead–lag matrix (full sample, edge-level scores).** Choose `score`: `tstat_diff` (default), `beta_diff`, `cross_corr`, `regression_r2`, `granger`, `levy`.
 
    ```bash
    python scripts/build_lead_lag_matrix.py
+   python scripts/build_lead_lag_matrix.py --score cross_corr --max_lag 5
    ```
 
 2. **Spectral analysis on \(S = C - C^\top\):**
@@ -67,6 +71,14 @@ pip install linearmodels
    python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --out data/leadlag_panel_forward.parquet
    python scripts/run_leadlag_tests.py --panel data/leadlag_panel_forward.parquet --direction forward
    ```
+
+4. **Rolling long–short backtest** (monthly rebalance, trailing window, PIT edges). Rebuilding \(C\) on every edge each month is heavy; use `--max_rebalances` for a quick run:
+
+   ```bash
+   python scripts/backtest_leadlag.py --score tstat_diff --rank_method leadingness --lookback_rows 504 --max_rebalances 12
+   ```
+
+   Outputs: `results/backtest/daily_strategy.csv`, `results/backtest/summary.json`.
 
 ## Python API (examples)
 
