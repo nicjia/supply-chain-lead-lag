@@ -38,6 +38,11 @@ def flat_backtest_run_params(cfg: dict[str, Any]) -> dict[str, Any]:
     ranking = cfg.get("ranking", {})
     bt = cfg.get("backtest", {})
     out = cfg.get("outputs", {})
+    ha = matrix.get("hybrid_alpha")
+    if ha is not None and ha != "":
+        hybrid_alpha: float | None = float(ha)
+    else:
+        hybrid_alpha = None
     return {
         "returns_parquet": paths.get("returns_parquet", "data/returns_with_gvkey.parquet"),
         "edges_csv": paths.get("edges_csv", "data/merged_edges.csv"),
@@ -45,6 +50,7 @@ def flat_backtest_run_params(cfg: dict[str, Any]) -> dict[str, Any]:
         "horizon": int(matrix.get("horizon", 1)),
         "max_lag": int(matrix.get("max_lag", 5)),
         "min_obs": int(matrix.get("min_obs", 80)),
+        "hybrid_alpha": hybrid_alpha,
         "rank_method": ranking.get("rank_method", "leadingness"),
         "n_clusters": int(ranking.get("n_clusters", 4)),
         "cluster_random_state": int(ranking.get("cluster_random_state", 0)),
@@ -86,6 +92,7 @@ def merge_backtest_cli(flat: dict[str, Any], args: Any) -> dict[str, Any]:
         "horizon",
         "max_lag",
         "min_obs",
+        "hybrid_alpha",
         "rank_method",
         "n_clusters",
         "cluster_random_state",
@@ -118,6 +125,28 @@ def merge_grid_cli(flat_grid: dict[str, Any], args: Any) -> dict[str, Any]:
     return m
 
 
+def _grid_n_clusters_list(g: dict[str, Any]) -> list[int] | None:
+    """If ``grid.n_clusters`` is a non-empty list, sweep those values; else ``None`` (single from ranking)."""
+    v = g.get("n_clusters")
+    if isinstance(v, list) and len(v) > 0:
+        return [int(x) for x in v]
+    return None
+
+
+def _grid_max_rebalances_list(g: dict[str, Any]) -> list[int | None] | None:
+    """If ``grid.max_rebalances`` is a non-empty list, sweep; use ``null`` / ``None`` for no cap."""
+    v = g.get("max_rebalances")
+    if not isinstance(v, list) or len(v) == 0:
+        return None
+    out: list[int | None] = []
+    for x in v:
+        if x is None or (isinstance(x, str) and x.strip().lower() in ("null", "none", "full", "all")):
+            out.append(None)
+        else:
+            out.append(int(x))
+    return out
+
+
 def grid_search_bundle(cfg: dict[str, Any]) -> dict[str, Any]:
     """Single dict for `grid_search_main_backtest` from merged YAML."""
     run = flat_backtest_run_params(cfg)
@@ -144,4 +173,7 @@ def grid_search_bundle(cfg: dict[str, Any]) -> dict[str, Any]:
         "max_rebalances": run["max_rebalances"],
         "n_clusters": run["n_clusters"],
         "cluster_random_state": run["cluster_random_state"],
+        "hybrid_alpha": run["hybrid_alpha"],
+        "n_clusters_grid": _grid_n_clusters_list(g),
+        "max_rebalances_grid": _grid_max_rebalances_list(g),
     }

@@ -37,11 +37,11 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 | Section | Role |
 |---------|------|
 | `paths` | `returns_parquet`, `edges_csv` |
-| `matrix` | `score`, `horizon`, `max_lag`, `min_obs` |
+| `matrix` | `score`, `horizon`, `max_lag`, `min_obs`, optional `hybrid_alpha` (blend return-based `C` with supply-only `C` before ranking; main leg only) |
 | `ranking` | `rank_method`, `n_clusters`, `cluster_random_state` |
 | `backtest` | `lookback_rows`, `rebalance_freq`, `q`, `max_rebalances`, `compare_baselines`, `momentum_window`, `baseline_seed` |
 | `outputs` | `daily_csv`, `summary_json`, `comparison_csv` |
-| `grid` | (grid script only) `scores`, `rank_methods`, `out_csv` |
+| `grid` | (grid script only) `scores`, `rank_methods`, optional `n_clusters` / `max_rebalances` **as lists** to sweep, `out_csv` |
 
 ## Quick pipeline
 
@@ -102,7 +102,7 @@ Defaults in `backtest_leadlag.py`: `score=tstat_diff`, `rank_method=leadingness`
 
 ### Grid search (pick score × rank_method)
 
-Run a **main-leg-only** sweep (sorted by Sharpe in the CSV). Use a small `--max_rebalances` first.
+Run a **main-leg-only** sweep (sorted by Sharpe in the CSV). A **tqdm** progress bar runs over grid cells; use `--no-progress` to disable it. Use a small `--max_rebalances` first.
 
 ```bash
 python scripts/grid_backtest.py --max_rebalances 8 --out_csv results/backtest/grid_main.csv
@@ -110,7 +110,7 @@ python scripts/grid_backtest.py --scores tstat_diff,cross_corr,levy --rank_metho
 python scripts/grid_backtest.py --rank_methods leadingness,spectral,cluster,cluster_eigen --n_clusters 6 --max_rebalances 8
 ```
 
-Or in Python: `grid_search_main_backtest(R, edges, max_rebalances=12)`.
+Or in Python: `grid_search_main_backtest(R, edges, max_rebalances=12, show_progress=True)`.
 
 ### Reading results (diagnosis)
 

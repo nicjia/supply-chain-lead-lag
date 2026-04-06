@@ -10,7 +10,9 @@ return momentum, structure-only leadingness, equal-weight long-only on the netwo
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
+from itertools import product
 from typing import Literal
 
 import numpy as np
@@ -21,6 +23,8 @@ from supply_chain_leadlag.matrix import (
     EdgeScoreMethod,
     LeadLagResult,
     build_lead_lag_matrix_gvkey,
+    hybrid_matrix,
+    leadlag_result_replace_C,
     structural_C_from_edges,
 )
 
@@ -219,6 +223,8 @@ def run_rolling_comparison(
     momentum_window: int = 20,
     baseline_seed: int = 0,
     include_baselines: bool = True,
+    hybrid_alpha: float | None = None,
+    show_progress: bool = False,
 ) -> ComparisonResult:
     """
     Same as `run_rolling_long_short` for **main**, plus baselines when `include_baselines`:
@@ -227,6 +233,12 @@ def run_rolling_comparison(
     - **momentum**: long–short on trailing-sum returns over `momentum_window` days.
     - **structural**: long–short on leadingness from `structural_C_from_edges` only.
     - **equal_weight**: long-only equal weight on the same network nodes (not dollar-neutral).
+
+    If ``hybrid_alpha`` is set in ``[0, 1]``, the **main** leg ranks from
+    ``α·C_data + (1−α)·C_supply`` (see :func:`~supply_chain_leadlag.matrix.hybrid_matrix`);
+    baselines are unchanged.
+
+    If ``show_progress`` is True, shows a tqdm bar over rebalance dates (requires tqdm).
     """
     R = R.sort_index()
     idx = R.index
@@ -237,13 +249,20 @@ def run_rolling_comparison(
     if max_rebalances is not None:
         rebalances = rebalances[: max_rebalances]
 
+    if show_progress:
+        from tqdm.auto import tqdm
+
+        rebalance_iter = tqdm(rebalances, desc="rebalances", unit="date")
+    else:
+        rebalance_iter = rebalances
+
     events_main: list[tuple[pd.Timestamp, pd.Series]] = []
     events_rand: list[tuple[pd.Timestamp, pd.Series]] = []
     events_mom: list[tuple[pd.Timestamp, pd.Series]] = []
     events_str: list[tuple[pd.Timestamp, pd.Series]] = []
     events_ew: list[tuple[pd.Timestamp, pd.Series]] = []
 
-    for T in rebalances:
+    for T in rebalance_iter:
         e_pit = filter_edges_pit(edges, T)
         R_win = returns_window(R, T, lookback_rows)
         if R_win.empty or len(e_pit) < 5:
@@ -261,6 +280,24 @@ def run_rolling_comparison(
             )
         except ValueError:
             continue
+
+        if hybrid_alpha is not None:
+            nodes = list(res.C.index)
+            C_sup = structural_C_from_edges(e_pit, nodes)
+            cmax = float(np.nanmax(np.abs(res.C.to_numpy(dtype=float))))
+            # If C_data ≈ 0, C_mix ∝ C_supply; leadingness ranks match structural → identical main vs structural.
+            if cmax < 1e-15:
+                warnings.warn(
+                    "Return-based C is numerically zero (e.g. all edge asymmetry scores zero). "
+                    "Hybrid main uses only supply weights, so with rank_method='leadingness' it "
+                    "matches the structural baseline. Use a score with nonzero asymmetry "
+                    "(e.g. tstat_diff, beta_diff) or omit hybrid_alpha.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            res = leadlag_result_replace_C(
+                res, hybrid_matrix(res.C, C_sup, float(hybrid_alpha))
+            )
 
         sc = scores_from_result(
             res,
@@ -339,6 +376,8 @@ def run_rolling_long_short(
     granger_n_lags: int = 2,
     winsor_q: float | None = 0.001,
     max_rebalances: int | None = None,
+    hybrid_alpha: float | None = None,
+    show_progress: bool = False,
 ) -> BacktestResult:
     """Lead–lag long–short only; skips baseline portfolios (faster)."""
     return run_rolling_comparison(
@@ -359,6 +398,8 @@ def run_rolling_long_short(
         winsor_q=winsor_q,
         max_rebalances=max_rebalances,
         include_baselines=False,
+        hybrid_alpha=hybrid_alpha,
+        show_progress=show_progress,
     ).main
 
 
@@ -399,6 +440,9 @@ def grid_search_main_backtest(
     *,
     scores: list[str] | None = None,
     rank_methods: list[str] | None = None,
+    n_clusters_grid: list[int] | None = None,
+    max_rebalances_grid: list[int | None] | None = None,
+    show_progress: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
     r"""
@@ -409,9 +453,16 @@ def grid_search_main_backtest(
     Each cell runs a full rolling backtest (main leg only) and records `portfolio_metrics`.
     Use `max_rebalances` in `kwargs` to cap cost while searching.
 
+    Optional ``n_clusters_grid`` / ``max_rebalances_grid`` (lists) add outer loops on those
+    hyperparameters; if omitted, single values from ``kwargs`` are used (``n_clusters`` default 4,
+    ``max_rebalances`` default ``None``).
+
+    If ``show_progress`` is True, shows a tqdm bar over grid cells (requires tqdm).
+
     Returns a DataFrame sorted by Sharpe descending (failed rows last).
     """
     from supply_chain_leadlag.signals import portfolio_metrics
+    from tqdm.auto import tqdm
 
     valid_rank: tuple[str, ...] = ("leadingness", "spectral", "cluster", "cluster_eigen")
 
@@ -420,45 +471,66 @@ def grid_search_main_backtest(
     if rank_methods is None:
         rank_methods = ["leadingness", "spectral"]
 
+    kw = dict(kwargs)
+    n_clusters_default = int(kw.pop("n_clusters", 4))
+    mr_default = kw.pop("max_rebalances", None)
+    nc_loop = n_clusters_grid if n_clusters_grid is not None else [n_clusters_default]
+    mr_loop = max_rebalances_grid if max_rebalances_grid is not None else [mr_default]
+
+    total = len(scores) * len(rank_methods) * len(nc_loop) * len(mr_loop)
+    combos = product(scores, rank_methods, nc_loop, mr_loop)
+    if show_progress:
+        combos = tqdm(
+            combos,
+            total=total,
+            desc="grid",
+            unit="cell",
+        )
+
     rows: list[dict] = []
-    for score in scores:
-        for rank_method in rank_methods:
-            if rank_method not in valid_rank:
-                raise ValueError(f"rank_method must be one of {valid_rank}, got {rank_method!r}")
-            rm: RankMethod = rank_method  # type: ignore[assignment]
-            try:
-                comp = run_rolling_comparison(
-                    R,
-                    edges,
-                    score=score,  # type: ignore[arg-type]
-                    rank_method=rm,
-                    include_baselines=False,
-                    **kwargs,
-                )
-                m = portfolio_metrics(comp.main.daily_ret)
-                rows.append(
-                    {
-                        "score": score,
-                        "rank_method": rm,
-                        "n_rebalances": int(len(comp.main.rebalance_log)),
-                        **m,
-                    }
-                )
-            except Exception as exc:
-                rows.append(
-                    {
-                        "score": score,
-                        "rank_method": rm,
-                        "sharpe": np.nan,
-                        "mean_daily": np.nan,
-                        "vol_daily": np.nan,
-                        "cum_return": np.nan,
-                        "max_drawdown": np.nan,
-                        "n_days": 0,
-                        "n_rebalances": 0,
-                        "error": str(exc),
-                    }
-                )
+    for score, rank_method, nc, mr in combos:
+        if rank_method not in valid_rank:
+            raise ValueError(f"rank_method must be one of {valid_rank}, got {rank_method!r}")
+        rm: RankMethod = rank_method  # type: ignore[assignment]
+        try:
+            comp = run_rolling_comparison(
+                R,
+                edges,
+                score=score,  # type: ignore[arg-type]
+                rank_method=rm,
+                include_baselines=False,
+                n_clusters=int(nc),
+                max_rebalances=mr,
+                **kw,
+            )
+            m = portfolio_metrics(comp.main.daily_ret)
+            rows.append(
+                {
+                    "score": score,
+                    "rank_method": rm,
+                    "n_clusters": int(nc),
+                    "max_rebalances": mr,
+                    "n_rebalances": int(len(comp.main.rebalance_log)),
+                    **m,
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "score": score,
+                    "rank_method": rm,
+                    "n_clusters": int(nc),
+                    "max_rebalances": mr,
+                    "sharpe": np.nan,
+                    "mean_daily": np.nan,
+                    "vol_daily": np.nan,
+                    "cum_return": np.nan,
+                    "max_drawdown": np.nan,
+                    "n_days": 0,
+                    "n_rebalances": 0,
+                    "error": str(exc),
+                }
+            )
 
     df = pd.DataFrame(rows)
     if "sharpe" in df.columns and df["sharpe"].notna().any():

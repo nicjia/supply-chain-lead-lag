@@ -53,6 +53,12 @@ def main():
     ap.add_argument("--rebalance_freq", default=None)
     ap.add_argument("--q", type=float, default=None)
     ap.add_argument("--min_obs", type=int, default=None)
+    ap.add_argument(
+        "--hybrid_alpha",
+        type=float,
+        default=None,
+        help="Blend main leg C with supply-only C: α·C_data+(1−α)·C_supply; omit for data-only.",
+    )
     ap.add_argument("--horizon", type=int, default=None)
     ap.add_argument("--max_lag", type=int, default=None)
     ap.add_argument("--momentum_window", type=int, default=None)
@@ -62,6 +68,11 @@ def main():
     ap.add_argument("--out_summary", default=None)
     ap.add_argument("--out_comparison", default=None)
     ap.add_argument("--max_rebalances", type=int, default=None)
+    ap.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show tqdm progress bar over rebalance dates.",
+    )
     args = ap.parse_args()
 
     cfg_path = args.config or default_config_path(_ROOT)
@@ -75,6 +86,10 @@ def main():
     print(f"[returns] {R.shape}  [edges] {len(edges):,} rows")
     if cfg_path:
         print(f"[config] {cfg_path}")
+    print(
+        f"[config] score={p['score']!r} rank_method={p['rank_method']!r} "
+        f"hybrid_alpha={p.get('hybrid_alpha')!r}"
+    )
 
     comp = run_rolling_comparison(
         R,
@@ -90,9 +105,11 @@ def main():
         horizon=int(p["horizon"]),
         max_lag=int(p["max_lag"]),
         max_rebalances=p["max_rebalances"],
+        hybrid_alpha=p.get("hybrid_alpha"),
         momentum_window=int(p["momentum_window"]),
         baseline_seed=int(p["baseline_seed"]),
         include_baselines=bool(p.get("compare_baselines", True)),
+        show_progress=bool(args.progress),
     )
 
     out_csv = Path(p["out_csv"])

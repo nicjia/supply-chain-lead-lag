@@ -14,6 +14,7 @@ def test_flat_defaults_empty_config():
     assert f["score"] == "tstat_diff"
     assert f["rank_method"] == "leadingness"
     assert f["compare_baselines"] is True
+    assert f["hybrid_alpha"] is None
 
 
 def test_load_repo_config_if_present():

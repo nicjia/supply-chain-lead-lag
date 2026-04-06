@@ -102,6 +102,19 @@ class LeadLagResult:
     leadingness: pd.Series
 
 
+def leadlag_result_replace_C(res: LeadLagResult, C_new: pd.DataFrame) -> LeadLagResult:
+    """Same edge scores; replace ``C`` (and recompute ``S``, ``leadingness``) for hybrid ranking."""
+    C_new = C_new.reindex(index=res.C.index, columns=res.C.columns, fill_value=0.0)
+    S_new = C_new - C_new.T
+    leadingness = S_new.sum(axis=1).sort_values(ascending=False)
+    return LeadLagResult(
+        edge_scores=res.edge_scores,
+        C=C_new,
+        S=S_new,
+        leadingness=leadingness,
+    )
+
+
 def build_lead_lag_matrix_gvkey(
     returns_wide: pd.DataFrame,
     edges_resolved: pd.DataFrame,

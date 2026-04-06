@@ -77,6 +77,26 @@ def test_run_rolling_comparison_smoke():
     assert "main" in tab["strategy"].values
 
 
+def test_hybrid_alpha_one_matches_no_hybrid():
+    """α=1 is pure C_data; main leg should match omitting hybrid_alpha."""
+    R = _synth_panel()
+    e = _synth_edges([f"{i:06d}" for i in range(1, 16)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    kw = dict(
+        lookback_rows=120,
+        rebalance_freq="BQE",
+        score="cross_corr",
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        max_rebalances=4,
+        include_baselines=False,
+    )
+    a = run_rolling_comparison(R, e, hybrid_alpha=None, **kw).main.daily_ret
+    b = run_rolling_comparison(R, e, hybrid_alpha=1.0, **kw).main.daily_ret
+    pd.testing.assert_series_equal(a, b, check_names=False)
+
+
 def test_grid_search_smoke():
     R = _synth_panel()
     e = _synth_edges([f"{i:06d}" for i in range(1, 16)])
@@ -86,6 +106,7 @@ def test_grid_search_smoke():
         e,
         scores=["cross_corr"],
         rank_methods=["leadingness"],
+        show_progress=False,
         lookback_rows=120,
         rebalance_freq="BQE",
         min_obs=40,
@@ -95,6 +116,32 @@ def test_grid_search_smoke():
     )
     assert "sharpe" in df.columns
     assert df.iloc[0]["score"] == "cross_corr"
+    assert "n_clusters" in df.columns and "max_rebalances" in df.columns
+
+
+def test_grid_search_n_clusters_and_mr_grids():
+    R = _synth_panel()
+    e = _synth_edges([f"{i:06d}" for i in range(1, 16)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    df = grid_search_main_backtest(
+        R,
+        e,
+        scores=["cross_corr"],
+        rank_methods=["leadingness"],
+        n_clusters_grid=[3, 5],
+        max_rebalances_grid=[2, 3],
+        show_progress=False,
+        lookback_rows=120,
+        rebalance_freq="BQE",
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        n_clusters=4,
+        max_rebalances=3,
+    )
+    assert len(df) == 2 * 2
+    pairs = set(zip(df["n_clusters"].tolist(), df["max_rebalances"].tolist()))
+    assert pairs == {(3, 2), (3, 3), (5, 2), (5, 3)}
 
 
 def test_run_rolling_cluster_rank_smoke():
