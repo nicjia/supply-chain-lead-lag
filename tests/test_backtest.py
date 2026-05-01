@@ -147,6 +147,28 @@ def test_grid_search_n_clusters_and_mr_grids():
     assert pairs == {(3, 2), (3, 3), (5, 2), (5, 3)}
 
 
+def test_grid_search_supplier_pressure_collapses_rank_methods():
+    R = _synth_panel()
+    e = _synth_edges([f"{i:06d}" for i in range(1, 16)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    df = grid_search_main_backtest(
+        R,
+        e,
+        scores=["cross_corr"],
+        rank_methods=["leadingness", "spectral", "cluster"],
+        signal_method="supplier_pressure",
+        show_progress=False,
+        lookback_rows=120,
+        rebalance_freq="BQE",
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        max_rebalances=2,
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["rank_method"] == "supplier_pressure"
+
+
 def test_run_rolling_cluster_rank_smoke():
     R = _synth_panel()
     e = _synth_edges([f"{i:06d}" for i in range(1, 16)])

@@ -78,7 +78,7 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 3. **Structural signal panel + tests:**
 
    ```bash
-   python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --out data/leadlag_panel_forward.parquet
+  python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --edge_date_col filing_date --edge_expiry_days 550 --out data/leadlag_panel_forward.parquet
    python scripts/run_leadlag_tests.py --panel data/leadlag_panel_forward.parquet --direction forward
    ```
 
@@ -126,7 +126,7 @@ Interpretation:
 
 ### Static vs tradable outputs
 
-- `scripts/build_lead_lag_matrix.py` builds a **static full-sample diagnostic matrix** (good for analysis/plots, not a tradable PIT object).
+- `scripts/build_lead_lag_matrix.py` builds a **static full-sample diagnostic matrix** (good for analysis/plots, not a tradable PIT object; supports `--edge_date_col` for consistency).
 - `scripts/backtest_leadlag.py` runs the **rolling PIT tradable backtest** (re-estimates inside each rebalance window).
 
 ### Backtest baselines (same rebalances, same \(q\))

@@ -155,6 +155,8 @@ def main():
 
     scores = bundle["scores"]
     rank_methods = bundle["rank_methods"] or ["leadingness", "spectral"]
+    if bundle.get("signal_method") == "supplier_pressure":
+        rank_methods = ["supplier_pressure"]
 
     print(f"[returns] {R.shape}  [edges] {len(edges):,} rows")
     if cfg_path:
@@ -166,7 +168,8 @@ def main():
     mr_n = len(mr_g) if mr_g else 1
     n_cells = n_s * len(rank_methods) * nc_n * mr_n
     print(
-        f"[grid] {n_s} scores × {len(rank_methods)} rank_methods × "
+        f"[grid] signal_method={bundle.get('signal_method')} | "
+        f"{n_s} scores × {len(rank_methods)} rank_methods × "
         f"{nc_n} n_clusters × {mr_n} max_rebalances ({n_cells} cells, main leg only)"
     )
 

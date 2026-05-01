@@ -14,6 +14,7 @@ from supply_chain_leadlag.matrix import build_lead_lag_matrix_gvkey, load_edges,
 def main():
     ap = argparse.ArgumentParser(description="Build lead–lag matrix C on supply-chain edges.")
     ap.add_argument("--edges_csv", default="merged_edges.csv")
+    ap.add_argument("--edge_date_col", default="srcdate", choices=["filing_date", "srcdate"])
     ap.add_argument("--returns_parquet", default="data/returns_with_gvkey.parquet")
     ap.add_argument(
         "--score",
@@ -45,7 +46,7 @@ def main():
         outdir = Path(f"results/leadlag_stage2_gvkey_{args.score}")
     outdir.mkdir(parents=True, exist_ok=True)
 
-    edges = load_edges(edges_csv)
+    edges = load_edges(edges_csv, date_col=args.edge_date_col)
     R = load_returns_wide_by_gvkey(returns_parquet)
 
     print(f"[edges] {len(edges):,} (with valid weight & customer_gvkey)")

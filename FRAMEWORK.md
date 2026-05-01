@@ -67,6 +67,34 @@ Hermitian spectrum and permutation tests on \(\lambda_{\max}(iS)\): `supply_chai
 
 ---
 
+## Empirical Paths and Interpretation
+
+This project uses three related but distinct empirical paths.
+
+### 1. PIT Panel Validation
+
+The panel regression path tests whether customer-return pressure predicts future supplier returns after controlling for supplier/date fixed effects and supplier return lags.
+
+This is the econometric validation layer: it answers whether directional customer-to-supplier diffusion exists in the data.
+
+### 2. Supplier-Pressure Backtest
+
+The `supplier_pressure` strategy is the main tradable thesis test. At each rebalance date, the model estimates a PIT lead-lag matrix `C`, where `C[customer, supplier]` measures customer-to-supplier predictive strength. Each trading day, it computes:
+
+```text
+supplier_signal_t = C.T @ customer_returns_t
+```
+
+Positions are formed from this supplier signal and applied on the next trading day, so the strategy tests whether observed customer shocks can be used to trade lagging suppliers.
+
+### 3. Rank-Factor Backtest
+
+The `rank_factor` strategy is a benchmark. It ranks firms by leader/lagger structure from `C` and trades high-ranked versus low-ranked names. This tests whether leadership/laggardness behaves like a cross-sectional factor, but it is not the primary customer-shock-to-supplier trading thesis.
+
+In short: panel regression validates diffusion, `supplier_pressure` trades diffusion, and `rank_factor` benchmarks network-ranking effects.
+
+---
+
 ## 4. Extensions (supported in code)
 
 - **Hybrid matrix:** `hybrid_matrix`

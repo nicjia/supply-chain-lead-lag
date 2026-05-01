@@ -6,8 +6,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from supply_chain_leadlag.matrix import load_edges
 
 BASE_DIR = "data"
 
@@ -18,6 +26,8 @@ def main():
     ap.add_argument("--horizon_max", type=int, default=5)
     ap.add_argument("--min_edge_weight", type=float, default=0.0)
     ap.add_argument("--use_logret", action="store_true")
+    ap.add_argument("--edge_date_col", type=str, default="filing_date", choices=["filing_date", "srcdate"])
+    ap.add_argument("--edge_expiry_days", type=int, default=None)
     ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
@@ -42,26 +52,8 @@ def main():
     # ----------------------------
     # 2) Load edges (merged_edges.csv — customer_gvkey already resolved)
     # ----------------------------
-    edges = pd.read_csv("merged_edges.csv")
-    edges["date"] = pd.to_datetime(edges["srcdate"]).dt.normalize()
-    edges["supplier_gvkey"] = edges["supplier_gvkey"].astype(str).str.zfill(6)
-    # customer_gvkey stored as float in CSV (e.g. 2285.0); convert float→int→str→zfill
-    edges["customer_gvkey"] = (
-        pd.to_numeric(edges["customer_gvkey"], errors="coerce")
-        .astype("Int64")
-        .astype(str)
-        .str.zfill(6)
-    )
-    edges["weight_wji"] = pd.to_numeric(edges["weight_wji"], errors="coerce")
-
-    # Drop relationship-only edges (no dollar weight)
-    edges = edges.dropna(subset=["weight_wji"]).copy()
-
-    # Drop rows where customer_gvkey was not resolved
-    edges = edges[edges["customer_gvkey"].notna()
-                  & (edges["customer_gvkey"] != "nan")
-                  & (edges["customer_gvkey"] != "<NA>")
-                  & (edges["customer_gvkey"] != "00<NA>")].copy()
+    edges = load_edges(f"{args.base_dir}/merged_edges.csv", date_col=args.edge_date_col)
+    edges["date"] = pd.to_datetime(edges["date"]).dt.normalize()
 
     if MIN_EDGE_WEIGHT is not None:
         edges = edges.loc[edges["weight_wji"].abs() >= float(MIN_EDGE_WEIGHT)].copy()
@@ -88,13 +80,17 @@ def main():
         tmp = trading_dates.copy()
         tmp["customer_gvkey"] = cg
         tmp["supplier_gvkey"] = sg
+        gdf2 = gdf[["date", "weight_wji"]].sort_values("date").rename(columns={"date": "edge_date"})
         tmp = pd.merge_asof(
             tmp,
-            gdf[["date", "weight_wji"]].sort_values("date"),
-            on="date",
+            gdf2,
+            left_on="date",
+            right_on="edge_date",
             direction="backward",
             allow_exact_matches=True,
         ).dropna(subset=["weight_wji"])
+        if args.edge_expiry_days is not None:
+            tmp = tmp.loc[(tmp["date"] - tmp["edge_date"]) <= pd.Timedelta(days=int(args.edge_expiry_days))]
         out_chunks.append(tmp)
 
     E_daily = pd.concat(out_chunks, ignore_index=True)

@@ -1,11 +1,14 @@
 """
-Rolling long–short backtest: PIT edges + trailing return window → C → ranks → portfolio.
+Rolling PIT backtests on supply-chain lead-lag structure.
 
-At rebalance date T, uses returns through T and edges with `date <= T` only. Weights apply
-from the first trading day strictly after T (no same-day trading on information dated T).
+At rebalance date T, uses returns through T and edges with `date <= T` only (with optional
+expiry and latest-state dedup). Weights apply from the first trading day strictly after T.
 
-Optional **baselines** (same rebalances, same universe, same q): random ranks, trailing
-return momentum, structure-only leadingness, equal-weight long-only on the network.
+Main strategy modes:
+- rank_factor: estimate C at each rebalance, convert to rank scores, then long/short.
+- supplier_pressure: estimate C at rebalance, then daily signal s_d = C.T @ r_d, trade at d+1.
+
+Optional baselines (same calendar/universe): random ranks, momentum, structure-only, equal-weight.
 """
 
 from __future__ import annotations
@@ -728,9 +731,8 @@ def grid_search_main_backtest(
     **kwargs,
 ) -> pd.DataFrame:
     r"""
-    Sweep (A) edge scoring for C (`score` in `build_lead_lag_matrix_gvkey`) × (B) global
-    ranking from C: `leadingness`, `spectral` (GlobalRank), `cluster`, `cluster_eigen`
-    (MetaCluster + ClusterRank; pass `n_clusters` / `cluster_random_state` in kwargs).
+    Sweep edge scoring for C (`score`), plus rank extraction method (`rank_method`) when
+    `signal_method='rank_factor'`.
 
     Each cell runs a full rolling backtest (main leg only) and records `portfolio_metrics`.
     Use `max_rebalances` in `kwargs` to cap cost while searching.
@@ -754,6 +756,10 @@ def grid_search_main_backtest(
         rank_methods = ["leadingness", "spectral"]
 
     kw = dict(kwargs)
+    signal_method = kw.get("signal_method", "rank_factor")
+    if signal_method == "supplier_pressure":
+        # rank_method is not used for supplier-pressure main leg; collapse duplicates.
+        rank_methods = ["supplier_pressure"]
     n_clusters_default = int(kw.pop("n_clusters", 4))
     mr_default = kw.pop("max_rebalances", None)
     nc_loop = n_clusters_grid if n_clusters_grid is not None else [n_clusters_default]
@@ -771,9 +777,9 @@ def grid_search_main_backtest(
 
     rows: list[dict] = []
     for score, rank_method, nc, mr in combos:
-        if rank_method not in valid_rank:
+        if signal_method != "supplier_pressure" and rank_method not in valid_rank:
             raise ValueError(f"rank_method must be one of {valid_rank}, got {rank_method!r}")
-        rm: RankMethod = rank_method  # type: ignore[assignment]
+        rm: RankMethod = "leadingness" if signal_method == "supplier_pressure" else rank_method  # type: ignore[assignment]
         try:
             comp = run_rolling_comparison(
                 R,
@@ -789,7 +795,7 @@ def grid_search_main_backtest(
             rows.append(
                 {
                     "score": score,
-                    "rank_method": rm,
+                    "rank_method": rank_method,
                     "n_clusters": int(nc),
                     "max_rebalances": mr,
                     "n_rebalances": int(len(comp.main.rebalance_log)),
@@ -800,7 +806,7 @@ def grid_search_main_backtest(
             rows.append(
                 {
                     "score": score,
-                    "rank_method": rm,
+                    "rank_method": rank_method,
                     "n_clusters": int(nc),
                     "max_rebalances": mr,
                     "sharpe": np.nan,
