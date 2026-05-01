@@ -78,14 +78,14 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 3. **Structural signal panel + tests:**
 
    ```bash
-  python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --edge_date_col filing_date --edge_expiry_days 550 --out data/leadlag_panel_forward.parquet
-   python scripts/run_leadlag_tests.py --panel data/leadlag_panel_forward.parquet --direction forward
+    python scripts/build_leadlag_panel.py --direction forward --horizon_max 5 --edge_date_col filing_date --edge_expiry_days 550 --out data/leadlag_panel_forward.parquet
+    python scripts/run_leadlag_tests.py --panel data/leadlag_panel_forward.parquet --direction forward
    ```
 
 4. **Rolling long–short backtest** (monthly rebalance, trailing window, PIT edges). Rebuilding \(C\) on every edge each month is heavy; use `--max_rebalances` for a quick run:
 
    ```bash
-  python scripts/backtest_leadlag.py --signal_method supplier_pressure --score tstat_diff --rank_method leadingness --lookback_rows 504 --max_rebalances 12
+    python scripts/backtest_leadlag.py --signal_method supplier_pressure --score tstat_diff --rank_method leadingness --lookback_rows 504 --max_rebalances 12
    ```
 
    Outputs (default): **multi-column** `results/backtest/daily_strategy.csv` (`main`, `random`, `momentum`, `structural`, `equal_weight`), `results/backtest/summary_comparison.csv` (Sharpe and other metrics per leg), and `results/backtest/summary.json` (main strategy only). Use `--no_compare` to run **only** the main leg and write a single-column CSV.
@@ -104,7 +104,19 @@ The backtest engine now supports a configurable net-of-cost path and risk overla
 - **Diagnostics:** output includes net return, gross return, daily cost, and daily turnover series per strategy.
 - **Risk overlays:** optional `max_abs_weight` cap, `beta_neutralize` (with `market_gvkey` and `beta_lookback_rows`), and `sector_neutralize` (with `sector_map_csv` containing `gvkey,sector`).
 
-Example (once returns parquet is available):
+Examples (once returns parquet is available):
+
+```bash
+python scripts/backtest_leadlag.py --progress
+```
+
+```bash
+python scripts/backtest_leadlag.py \         
+  --commission_bps 1 \
+  --slippage_bps 5 \
+  --borrow_bps_annual 100 \
+  --progress
+```
 
 ```bash
 python scripts/backtest_leadlag.py \
@@ -168,30 +180,6 @@ Or in Python: `grid_search_main_backtest(R, edges, max_rebalances=12, show_progr
 - **structural > main:** pure supply weights can rank more stably than return-based edge tests—consider **hybrid** \(C\) (`hybrid_matrix`) or using structural ranks as a second signal.
 - **momentum** baseline is *not* academic 12–1 momentum; it is **long–short on summed returns** over `momentum_window` inside the lookback. A negative Sharpe there does not imply “stock momentum fails”; it means that particular raw-sum long–short underperformed in your sample.
 - **Improvements:** try the grid; adjust `lookback_rows`, `q`, `horizon`; add transaction-cost filters; walk-forward or hold-out years to reduce overfitting to the best cell.
-
-## Python API (examples)
-
-```python
-from supply_chain_leadlag import (
-    load_edges,
-    load_returns_wide_by_gvkey,
-    build_lead_lag_matrix_gvkey,
-    structural_C_from_edges,
-    hybrid_matrix,
-    global_rank_spectral_df,
-    matrix_compare_frobenius,
-)
-
-edges = load_edges("data/merged_edges.csv")
-R = load_returns_wide_by_gvkey("data/returns_with_gvkey.parquet")
-res = build_lead_lag_matrix_gvkey(R, edges, horizon=1, min_obs=80)
-
-nodes = list(res.C.index)
-C_sup = structural_C_from_edges(edges, nodes)
-C_mix = hybrid_matrix(res.C, C_sup, alpha=0.5)
-print("Frobenius distance data vs supply:", matrix_compare_frobenius(res.C, C_sup))
-print(global_rank_spectral_df(C_mix).sort_values(ascending=False).head())
-```
 
 ## Tests
 
