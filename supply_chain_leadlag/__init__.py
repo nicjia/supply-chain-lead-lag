@@ -5,6 +5,7 @@ from supply_chain_leadlag.backtest import (
     BacktestResult,
     ComparisonResult,
     RankMethod,
+    SignalMethod,
     comparison_metrics_table,
     filter_edges_pit,
     grid_search_main_backtest,
@@ -12,6 +13,7 @@ from supply_chain_leadlag.backtest import (
     run_rolling_comparison,
     run_rolling_long_short,
     scores_from_result,
+    supplier_pressure_signal,
 )
 from supply_chain_leadlag.global_structure import (
     cluster_rank_series,
@@ -45,6 +47,7 @@ __all__ = [
     "load_returns_wide_by_gvkey",
     "EdgeScoreMethod",
     "RankMethod",
+    "SignalMethod",
     "LeadLagResult",
     "build_lead_lag_matrix_gvkey",
     "structural_C_from_edges",
@@ -72,4 +75,5 @@ __all__ = [
     "run_rolling_comparison",
     "run_rolling_long_short",
     "scores_from_result",
+    "supplier_pressure_signal",
 ]

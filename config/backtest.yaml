@@ -5,6 +5,11 @@ paths:
   returns_parquet: data/returns_with_gvkey.parquet
   edges_csv: data/merged_edges.csv
 
+strategy:
+  signal_method: supplier_pressure
+  edge_date_col: filing_date
+  edge_expiry_days: 550
+
 # How each supply-chain edge is scored into C (see build_lead_lag_matrix_gvkey).
 matrix:
   score: tstat_diff

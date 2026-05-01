@@ -62,7 +62,12 @@ def global_rank_spectral_from_C(C: np.ndarray) -> np.ndarray:
 def global_rank_spectral_df(C: pd.DataFrame) -> pd.Series:
     idx = list(C.index)
     scores = global_rank_spectral_from_C(C.to_numpy(dtype=float))
-    return pd.Series(scores, index=idx, name="global_rank_spectral")
+    s = pd.Series(scores, index=idx, name="global_rank_spectral")
+    anchor = (C - C.T).sum(axis=1).reindex(s.index)
+    corr = float(s.corr(anchor)) if anchor.notna().sum() > 1 else np.nan
+    if np.isfinite(corr) and corr < 0:
+        s = -s
+    return s
 
 
 def meta_cluster_labels(C: np.ndarray, n_clusters: int = 4, random_state: int = 0) -> np.ndarray:
@@ -121,9 +126,14 @@ def cluster_flow_matrix(C: np.ndarray, labels: np.ndarray) -> np.ndarray:
     labs = np.asarray(labels, dtype=int)
     k = int(labs.max()) + 1
     F = np.zeros((k, k), dtype=float)
-    for i in range(C.shape[0]):
-        for j in range(C.shape[1]):
-            F[labs[i], labs[j]] += C[i, j]
+    idx_by_cluster = {c: np.where(labs == c)[0] for c in range(k)}
+    for a in range(k):
+        ia = idx_by_cluster[a]
+        for b in range(k):
+            ib = idx_by_cluster[b]
+            if len(ia) == 0 or len(ib) == 0:
+                continue
+            F[a, b] = float(C[np.ix_(ia, ib)].sum()) / float(len(ia) * len(ib))
     return F
 
 
@@ -137,6 +147,7 @@ def cluster_rank_scores(C: np.ndarray, labels: np.ndarray, local: str = "row_sum
     scores = np.zeros(n, dtype=float)
     F = cluster_flow_matrix(C, labs)
     net = cluster_net_influence(F)
+    net = (net - np.nanmean(net)) / (np.nanstd(net) + 1e-12)
     uniq = np.unique(labs)
     for c in uniq:
         idx = np.where(labs == c)[0]
@@ -147,7 +158,7 @@ def cluster_rank_scores(C: np.ndarray, labels: np.ndarray, local: str = "row_sum
             local_s = global_rank_spectral_from_C(sub) if sub.size else np.zeros(len(idx))
         else:
             raise ValueError("local must be 'row_sum' or 'eigen'")
-        local_s = local_s - np.nanmean(local_s)
+        local_s = (local_s - np.nanmean(local_s)) / (np.nanstd(local_s) + 1e-12)
         scores[idx] = local_s + net[c]
     return scores
 

@@ -18,6 +18,9 @@ def test_flat_defaults_empty_config():
     assert f["commission_bps"] == 0.0
     assert f["beta_neutralize"] is False
     assert f["sector_neutralize"] is False
+    assert f["signal_method"] == "rank_factor"
+    assert f["edge_date_col"] == "srcdate"
+    assert f["edge_expiry_days"] is None
 
 
 def test_load_repo_config_if_present():

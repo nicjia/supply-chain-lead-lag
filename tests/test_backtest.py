@@ -4,10 +4,12 @@ import pandas as pd
 from supply_chain_leadlag.backtest import (
     apply_risk_overlays,
     comparison_metrics_table,
+    filter_edges_pit,
     grid_search_main_backtest,
     long_short_weights,
     run_rolling_comparison,
     run_rolling_long_short,
+    supplier_pressure_signal,
 )
 
 
@@ -205,3 +207,74 @@ def test_apply_risk_overlays_sector_and_beta():
     assert float(w2.abs().max()) <= 0.5 + 1e-12
     exp = float((w2 * betas).sum())
     assert abs(exp) < 1e-8
+
+
+def test_filter_edges_pit_keeps_latest_and_optional_expiry():
+    e = pd.DataFrame(
+        {
+            "customer_gvkey": ["000001", "000001", "000001", "000002"],
+            "supplier_gvkey": ["000010", "000010", "000011", "000012"],
+            "date": pd.to_datetime(["2020-01-01", "2020-06-01", "2018-01-01", "2020-05-01"]),
+            "weight_wji": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+    pit = filter_edges_pit(e, pd.Timestamp("2020-07-01"))
+    row = pit[(pit["customer_gvkey"] == "000001") & (pit["supplier_gvkey"] == "000010")].iloc[0]
+    assert abs(float(row["weight_wji"]) - 0.2) < 1e-12
+    pit_exp = filter_edges_pit(e, pd.Timestamp("2020-07-01"), expiry_days=365)
+    assert not ((pit_exp["customer_gvkey"] == "000001") & (pit_exp["supplier_gvkey"] == "000011")).any()
+
+
+def test_supplier_pressure_signal_orientation():
+    C = pd.DataFrame(
+        [[0.0, 0.8], [0.0, 0.0]],
+        index=["custA", "suppB"],
+        columns=["custA", "suppB"],
+    )
+    r = pd.Series({"custA": 0.05, "suppB": 0.0})
+    s = supplier_pressure_signal(C, r)
+    assert abs(float(s["suppB"]) - 0.04) < 1e-12
+    assert abs(float(s["custA"])) < 1e-12
+
+
+def test_run_rolling_supplier_pressure_smoke():
+    R = _synth_panel(n=280, n_stock=30)
+    e = _synth_edges([f"{i:06d}" for i in range(1, 31)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    res = run_rolling_long_short(
+        R,
+        e,
+        signal_method="supplier_pressure",
+        lookback_rows=120,
+        rebalance_freq="BME",
+        score="cross_corr",
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        max_rebalances=3,
+    )
+    assert len(res.daily_ret) == len(R)
+    assert res.daily_ret.notna().sum() > 0
+
+
+def test_supplier_pressure_positive_customer_shock_longs_supplier_next_day():
+    dates = pd.date_range("2020-01-01", periods=8, freq="B")
+    cols = ["CUST01", "SUPP01"] + [f"DUMMY{i:02d}" for i in range(30)]
+
+    R = pd.DataFrame(0.0, index=dates, columns=cols)
+    R.loc[dates[2], "CUST01"] = 0.10
+    R.loc[dates[3], "SUPP01"] = 0.05
+
+    C = pd.DataFrame(0.0, index=cols, columns=cols)
+    C.loc["CUST01", "SUPP01"] = 1.0
+
+    r_today = R.loc[dates[2]].reindex(C.index).fillna(0.0)
+    supplier_signal = pd.Series(C.to_numpy(dtype=float).T @ r_today.to_numpy(dtype=float), index=C.columns)
+    supplier_signal.loc[[c for c in cols if c != "SUPP01"]] = -1e-6
+
+    w = long_short_weights(supplier_signal, q=0.1, long_high=True)
+    gross_next_day = float((w * R.loc[dates[3]].reindex(w.index).fillna(0.0)).sum())
+
+    assert supplier_signal.loc["SUPP01"] > 0
+    assert w.loc["SUPP01"] > 0
+    assert gross_next_day > 0

@@ -252,12 +252,18 @@ def structural_C_from_edges(edges: pd.DataFrame, nodes: list[str]) -> pd.DataFra
 
 
 def hybrid_matrix(C_data: pd.DataFrame, C_supply: pd.DataFrame, alpha: float) -> pd.DataFrame:
-    """C_hybrid = α C_data + (1−α) C_supply (aligned indices)."""
+    """Frobenius-normalized blend: C_hybrid = α C_data + (1−α) C_supply (aligned indices)."""
     if not (0.0 <= alpha <= 1.0):
         raise ValueError("alpha must be in [0,1]")
     nodes = sorted(set(C_data.index).union(C_data.columns).union(C_supply.index).union(C_supply.columns))
     A = C_data.reindex(index=nodes, columns=nodes, fill_value=0.0)
     B = C_supply.reindex(index=nodes, columns=nodes, fill_value=0.0)
+    na = float(np.linalg.norm(A.to_numpy(dtype=float), ord="fro"))
+    nb = float(np.linalg.norm(B.to_numpy(dtype=float), ord="fro"))
+    if na > 1e-12:
+        A = A / na
+    if nb > 1e-12:
+        B = B / nb
     return alpha * A + (1.0 - alpha) * B
 
 
@@ -270,9 +276,17 @@ def load_returns_wide_by_gvkey(returns_parquet: str) -> pd.DataFrame:
     return r.pivot_table(index="date", columns="gvkey", values="RET", aggfunc="last").sort_index()
 
 
-def load_edges(edges_csv: str, source_filter: str | None = None) -> pd.DataFrame:
+def load_edges(
+    edges_csv: str,
+    source_filter: str | None = None,
+    *,
+    date_col: str = "srcdate",
+) -> pd.DataFrame:
     e = pd.read_csv(edges_csv)
-    e["date"] = pd.to_datetime(e["srcdate"])
+    if date_col == "filing_date" and "filing_date" in e.columns:
+        e["date"] = pd.to_datetime(e["filing_date"], errors="coerce")
+    else:
+        e["date"] = pd.to_datetime(e["srcdate"], errors="coerce")
     if source_filter is not None and "source" in e.columns:
         e = e[e["source"] == source_filter].copy()
     e["supplier_gvkey"] = e["supplier_gvkey"].astype(str).str.zfill(6)

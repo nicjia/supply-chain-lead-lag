@@ -29,9 +29,23 @@ from supply_chain_leadlag.matrix import (
 )
 
 
-def filter_edges_pit(edges: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
+def filter_edges_pit(
+    edges: pd.DataFrame,
+    asof: pd.Timestamp,
+    *,
+    expiry_days: int | None = None,
+) -> pd.DataFrame:
     asof = pd.Timestamp(asof)
-    return edges.loc[edges["date"] <= asof].copy()
+    e = edges.loc[edges["date"] <= asof].copy()
+    if expiry_days is not None:
+        e = e.loc[e["date"] >= (asof - pd.Timedelta(days=int(expiry_days)))]
+    if e.empty:
+        return e
+    return (
+        e.sort_values(["customer_gvkey", "supplier_gvkey", "date"])
+        .drop_duplicates(["customer_gvkey", "supplier_gvkey"], keep="last")
+        .reset_index(drop=True)
+    )
 
 
 def returns_window(R: pd.DataFrame, end: pd.Timestamp, n_rows: int) -> pd.DataFrame:
@@ -43,6 +57,7 @@ def returns_window(R: pd.DataFrame, end: pd.Timestamp, n_rows: int) -> pd.DataFr
 
 
 RankMethod = Literal["leadingness", "spectral", "cluster", "cluster_eigen"]
+SignalMethod = Literal["supplier_pressure", "rank_factor"]
 
 
 def scores_from_result(
@@ -100,6 +115,18 @@ def structural_leadingness_scores(e_pit: pd.DataFrame, nodes: list[str]) -> pd.S
     C_sup = structural_C_from_edges(e_pit, nodes)
     S_sup = C_sup - C_sup.T
     return S_sup.sum(axis=1)
+
+
+def supplier_pressure_signal(C: pd.DataFrame, r_today: pd.Series) -> pd.Series:
+    """
+    Supplier-pressure signal from customer returns.
+
+    If C[customer, supplier] is lead strength, then for day d:
+    s_d(supplier) = sum_customer C[customer, supplier] * r_customer,d = C.T @ r_d.
+    """
+    rt = r_today.reindex(C.index).fillna(0.0).to_numpy(dtype=float)
+    sig = C.to_numpy(dtype=float).T @ rt
+    return pd.Series(sig, index=C.columns, dtype=float)
 
 
 def long_short_weights(
@@ -300,6 +327,7 @@ def apply_risk_overlays(
             out = out - lam * b
             if max_abs_weight is not None and max_abs_weight > 0:
                 out = out.clip(lower=-max_abs_weight, upper=max_abs_weight)
+    out = _normalize_long_short_weights(out)
     return out
 
 
@@ -321,6 +349,7 @@ def run_rolling_comparison(
     lookback_rows: int = 504,
     rebalance_freq: str = "BME",
     score: EdgeScoreMethod = "tstat_diff",
+    signal_method: SignalMethod = "rank_factor",
     rank_method: RankMethod = "leadingness",
     n_clusters: int = 4,
     cluster_random_state: int = 0,
@@ -345,6 +374,7 @@ def run_rolling_comparison(
     market_ret: pd.Series | None = None,
     sector_neutralize: bool = False,
     sector_map: pd.Series | None = None,
+    edge_expiry_days: int | None = None,
     show_progress: bool = False,
 ) -> ComparisonResult:
     """
@@ -383,8 +413,11 @@ def run_rolling_comparison(
     events_str: list[tuple[pd.Timestamp, pd.Series]] = []
     events_ew: list[tuple[pd.Timestamp, pd.Series]] = []
 
-    for T in rebalance_iter:
-        e_pit = filter_edges_pit(edges, T)
+    rebals = list(pd.DatetimeIndex(rebalances))
+    for i, T in enumerate(rebalance_iter):
+        T = pd.Timestamp(T)
+        next_T = pd.Timestamp(rebals[i + 1]) if i + 1 < len(rebals) else pd.Timestamp(idx.max())
+        e_pit = filter_edges_pit(edges, T, expiry_days=edge_expiry_days)
         R_win = returns_window(R, T, lookback_rows)
         if R_win.empty or len(e_pit) < 5:
             continue
@@ -426,21 +459,51 @@ def run_rolling_comparison(
             n_clusters=n_clusters,
             cluster_random_state=cluster_random_state,
         )
-        w_main = long_short_weights(sc, q=q, long_high=long_high)
-        betas = _estimate_betas(R_win, market_ret, beta_lookback_rows) if (beta_neutralize and market_ret is not None) else None
-        w_main = apply_risk_overlays(
-            w_main,
-            max_abs_weight=max_abs_weight,
-            beta_neutralize=beta_neutralize,
-            betas=betas,
-            sector_neutralize=sector_neutralize,
-            sector_map=sector_map,
+        betas = (
+            _estimate_betas(R_win, market_ret, beta_lookback_rows)
+            if (beta_neutralize and market_ret is not None)
+            else None
         )
-        if w_main.empty or w_main.abs().sum() == 0:
-            continue
-
-        wm = expand_to_columns(w_main, R)
-        events_main.append((T, wm))
+        if signal_method == "rank_factor":
+            w_main = long_short_weights(sc, q=q, long_high=long_high)
+            w_main = apply_risk_overlays(
+                w_main,
+                max_abs_weight=max_abs_weight,
+                beta_neutralize=beta_neutralize,
+                betas=betas,
+                sector_neutralize=sector_neutralize,
+                sector_map=sector_map,
+            )
+            if w_main.empty or w_main.abs().sum() == 0:
+                continue
+            wm = expand_to_columns(w_main, R)
+            events_main.append((T, wm))
+        elif signal_method == "supplier_pressure":
+            in_block = idx[(idx > T) & (idx < next_T)]
+            if len(in_block) == 0:
+                continue
+            for d in in_block:
+                r_today = R.loc[d]
+                sp = supplier_pressure_signal(res.C, r_today)
+                w_main = long_short_weights(sp, q=q, long_high=True)
+                if beta_neutralize and market_ret is not None:
+                    d_win = R.loc[:d].iloc[-lookback_rows:]
+                    betas_d = _estimate_betas(d_win, market_ret, beta_lookback_rows)
+                else:
+                    betas_d = betas
+                w_main = apply_risk_overlays(
+                    w_main,
+                    max_abs_weight=max_abs_weight,
+                    beta_neutralize=beta_neutralize,
+                    betas=betas_d,
+                    sector_neutralize=sector_neutralize,
+                    sector_map=sector_map,
+                )
+                if w_main.empty or w_main.abs().sum() == 0:
+                    continue
+                events_main.append((pd.Timestamp(d), expand_to_columns(w_main, R)))
+        else:
+            raise ValueError(f"Unknown signal_method {signal_method!r}")
 
         if include_baselines:
             rng = np.random.default_rng((baseline_seed + int(pd.Timestamp(T).value)) % (2**32))
@@ -557,6 +620,7 @@ def run_rolling_long_short(
     lookback_rows: int = 504,
     rebalance_freq: str = "BME",
     score: EdgeScoreMethod = "tstat_diff",
+    signal_method: SignalMethod = "rank_factor",
     rank_method: RankMethod = "leadingness",
     n_clusters: int = 4,
     cluster_random_state: int = 0,
@@ -578,6 +642,7 @@ def run_rolling_long_short(
     market_ret: pd.Series | None = None,
     sector_neutralize: bool = False,
     sector_map: pd.Series | None = None,
+    edge_expiry_days: int | None = None,
     show_progress: bool = False,
 ) -> BacktestResult:
     """Lead–lag long–short only; skips baseline portfolios (faster)."""
@@ -587,6 +652,7 @@ def run_rolling_long_short(
         lookback_rows=lookback_rows,
         rebalance_freq=rebalance_freq,
         score=score,
+        signal_method=signal_method,
         rank_method=rank_method,
         n_clusters=n_clusters,
         cluster_random_state=cluster_random_state,
@@ -609,6 +675,7 @@ def run_rolling_long_short(
         market_ret=market_ret,
         sector_neutralize=sector_neutralize,
         sector_map=sector_map,
+        edge_expiry_days=edge_expiry_days,
         show_progress=show_progress,
     ).main
 

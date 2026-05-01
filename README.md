@@ -37,6 +37,7 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 | Section | Role |
 |---------|------|
 | `paths` | `returns_parquet`, `edges_csv` |
+| `strategy` | `signal_method` (`supplier_pressure` \| `rank_factor`), `edge_date_col` (`filing_date` \| `srcdate`), optional `edge_expiry_days` |
 | `matrix` | `score`, `horizon`, `max_lag`, `min_obs`, optional `hybrid_alpha` (blend return-based `C` with supply-only `C` before ranking; main leg only) |
 | `ranking` | `rank_method`, `n_clusters`, `cluster_random_state` |
 | `backtest` | `lookback_rows`, `rebalance_freq`, `q`, `max_rebalances`, `compare_baselines`, `momentum_window`, `baseline_seed` |
@@ -84,10 +85,16 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 4. **Rolling long–short backtest** (monthly rebalance, trailing window, PIT edges). Rebuilding \(C\) on every edge each month is heavy; use `--max_rebalances` for a quick run:
 
    ```bash
-   python scripts/backtest_leadlag.py --score tstat_diff --rank_method leadingness --lookback_rows 504 --max_rebalances 12
+  python scripts/backtest_leadlag.py --signal_method supplier_pressure --score tstat_diff --rank_method leadingness --lookback_rows 504 --max_rebalances 12
    ```
 
    Outputs (default): **multi-column** `results/backtest/daily_strategy.csv` (`main`, `random`, `momentum`, `structural`, `equal_weight`), `results/backtest/summary_comparison.csv` (Sharpe and other metrics per leg), and `results/backtest/summary.json` (main strategy only). Use `--no_compare` to run **only** the main leg and write a single-column CSV.
+
+  Strategy semantics:
+  - `signal_method=supplier_pressure` (default): at each rebalance estimate \(C\), then on each day \(d\) in the block compute supplier signals \(s_d = C^\top r_d\), and apply weights on \(d+1\).
+  - `signal_method=rank_factor`: classic leader-vs-lagger cross-sectional rank-factor portfolio from `scores_from_result(...)`.
+  - `edge_date_col=filing_date` is safer for tradable PIT timing (falls back to `srcdate` if unavailable).
+  - `edge_expiry_days` (optional) drops stale links beyond the lookback horizon before taking latest edge state.
 
 ### Real backtesting controls
 
@@ -116,6 +123,11 @@ Interpretation:
 - `main_gross` is before costs.
 - `main_cost` is total daily cost drag in return units.
 - `main_turnover` is one-way turnover applied at rebalance transitions.
+
+### Static vs tradable outputs
+
+- `scripts/build_lead_lag_matrix.py` builds a **static full-sample diagnostic matrix** (good for analysis/plots, not a tradable PIT object).
+- `scripts/backtest_leadlag.py` runs the **rolling PIT tradable backtest** (re-estimates inside each rebalance window).
 
 ### Backtest baselines (same rebalances, same \(q\))
 

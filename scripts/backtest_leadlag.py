@@ -38,6 +38,17 @@ def main():
     ap.add_argument("--returns_parquet", default=None)
     ap.add_argument("--edges_csv", default=None)
     ap.add_argument(
+        "--signal_method",
+        default=None,
+        choices=["supplier_pressure", "rank_factor"],
+    )
+    ap.add_argument(
+        "--edge_date_col",
+        default=None,
+        choices=["filing_date", "srcdate"],
+    )
+    ap.add_argument("--edge_expiry_days", type=int, default=None)
+    ap.add_argument(
         "--score",
         default=None,
         choices=["tstat_diff", "beta_diff", "cross_corr", "regression_r2", "granger", "levy"],
@@ -90,7 +101,7 @@ def main():
     p = merge_backtest_cli(flat, args)
 
     R = load_returns_wide_by_gvkey(p["returns_parquet"])
-    edges = load_edges(p["edges_csv"])
+    edges = load_edges(p["edges_csv"], date_col=str(p.get("edge_date_col", "srcdate")))
     market_ret = None
     if p.get("market_gvkey"):
         mk = str(p["market_gvkey"])
@@ -115,8 +126,8 @@ def main():
     if cfg_path:
         print(f"[config] {cfg_path}")
     print(
-        f"[config] score={p['score']!r} rank_method={p['rank_method']!r} "
-        f"hybrid_alpha={p.get('hybrid_alpha')!r}"
+        f"[config] signal_method={p['signal_method']!r} score={p['score']!r} "
+        f"rank_method={p['rank_method']!r} hybrid_alpha={p.get('hybrid_alpha')!r}"
     )
 
     comp = run_rolling_comparison(
@@ -125,6 +136,7 @@ def main():
         lookback_rows=int(p["lookback_rows"]),
         rebalance_freq=str(p["rebalance_freq"]),
         score=p["score"],  # type: ignore[arg-type]
+        signal_method=p["signal_method"],  # type: ignore[arg-type]
         rank_method=p["rank_method"],  # type: ignore[arg-type]
         n_clusters=int(p["n_clusters"]),
         cluster_random_state=int(p["cluster_random_state"]),
@@ -146,6 +158,7 @@ def main():
         market_ret=market_ret,
         sector_neutralize=bool(p.get("sector_neutralize", False)),
         sector_map=sector_map,
+        edge_expiry_days=p.get("edge_expiry_days"),
         show_progress=bool(args.progress),
     )
 

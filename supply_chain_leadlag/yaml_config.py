@@ -35,6 +35,7 @@ def flat_backtest_run_params(cfg: dict[str, Any]) -> dict[str, Any]:
     """Flatten YAML sections to kwargs for `run_rolling_comparison` + paths + outputs."""
     paths = cfg.get("paths", {})
     matrix = cfg.get("matrix", {})
+    strategy = cfg.get("strategy", {})
     ranking = cfg.get("ranking", {})
     bt = cfg.get("backtest", {})
     out = cfg.get("outputs", {})
@@ -43,10 +44,15 @@ def flat_backtest_run_params(cfg: dict[str, Any]) -> dict[str, Any]:
         hybrid_alpha: float | None = float(ha)
     else:
         hybrid_alpha = None
+    ed = strategy.get("edge_expiry_days")
+    edge_expiry_days = int(ed) if ed is not None and ed != "" else None
     return {
         "returns_parquet": paths.get("returns_parquet", "data/returns_with_gvkey.parquet"),
         "edges_csv": paths.get("edges_csv", "data/merged_edges.csv"),
         "score": matrix.get("score", "tstat_diff"),
+        "signal_method": strategy.get("signal_method", "rank_factor"),
+        "edge_date_col": strategy.get("edge_date_col", "srcdate"),
+        "edge_expiry_days": edge_expiry_days,
         "horizon": int(matrix.get("horizon", 1)),
         "max_lag": int(matrix.get("max_lag", 5)),
         "min_obs": int(matrix.get("min_obs", 80)),
@@ -103,6 +109,9 @@ def merge_backtest_cli(flat: dict[str, Any], args: Any) -> dict[str, Any]:
         "horizon",
         "max_lag",
         "min_obs",
+        "signal_method",
+        "edge_date_col",
+        "edge_expiry_days",
         "hybrid_alpha",
         "rank_method",
         "n_clusters",
@@ -186,6 +195,9 @@ def grid_search_bundle(cfg: dict[str, Any]) -> dict[str, Any]:
         "scores": scores,
         "rank_methods": rank_methods,
         "out_csv": out_csv,
+        "signal_method": run["signal_method"],
+        "edge_date_col": run["edge_date_col"],
+        "edge_expiry_days": run["edge_expiry_days"],
         "lookback_rows": run["lookback_rows"],
         "rebalance_freq": run["rebalance_freq"],
         "q": run["q"],

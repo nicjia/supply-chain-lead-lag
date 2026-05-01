@@ -34,6 +34,9 @@ def main():
     ap.add_argument("--config", default=None)
     ap.add_argument("--returns_parquet", default=None)
     ap.add_argument("--edges_csv", default=None)
+    ap.add_argument("--signal_method", default=None, choices=["supplier_pressure", "rank_factor"])
+    ap.add_argument("--edge_date_col", default=None, choices=["filing_date", "srcdate"])
+    ap.add_argument("--edge_expiry_days", type=int, default=None)
     ap.add_argument("--scores", default=None, help="Comma-separated; default from YAML or all six.")
     ap.add_argument("--rank_methods", default=None, help="Comma-separated; default from YAML.")
     ap.add_argument("--lookback_rows", type=int, default=None)
@@ -93,6 +96,9 @@ def main():
         "min_obs",
         "horizon",
         "max_lag",
+        "signal_method",
+        "edge_date_col",
+        "edge_expiry_days",
         "max_rebalances",
         "n_clusters",
         "cluster_random_state",
@@ -127,7 +133,7 @@ def main():
         bundle["max_rebalances_grid"] = mrb
 
     R = load_returns_wide_by_gvkey(bundle["returns_parquet"])
-    edges = load_edges(bundle["edges_csv"])
+    edges = load_edges(bundle["edges_csv"], date_col=str(bundle.get("edge_date_col", "srcdate")))
     market_ret = None
     if bundle.get("market_gvkey"):
         mk = str(bundle["market_gvkey"])
@@ -178,6 +184,8 @@ def main():
         min_obs=int(bundle["min_obs"]),
         horizon=int(bundle["horizon"]),
         max_lag=int(bundle["max_lag"]),
+        signal_method=bundle["signal_method"],
+        edge_expiry_days=bundle.get("edge_expiry_days"),
         max_rebalances=bundle["max_rebalances"],
         n_clusters=int(bundle["n_clusters"]),
         cluster_random_state=int(bundle["cluster_random_state"]),
