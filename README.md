@@ -43,6 +43,16 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
 | `outputs` | `daily_csv`, `summary_json`, `comparison_csv` |
 | `grid` | (grid script only) `scores`, `rank_methods`, optional `n_clusters` / `max_rebalances` **as lists** to sweep, `out_csv` |
 
+## Current Progress And Results
+
+- Core pipeline is implemented end-to-end in Python: edge-level lead-lag scoring, global ranking, structural/hybrid matrices, rolling PIT backtests, and grid sweeps.
+- Checked-in artifacts currently include spectral diagnostics only in `results/leadlag_spectral_h1/`:
+  - skew-symmetry sanity check (`max|S+S^T|=0`, shape `(521, 521)`),
+  - spectrum and embedding plots,
+  - permutation null test with `obs_maxeig=3.16026`, `p_value=0.0739261`.
+- Real-data backtest outputs are not committed yet under `results/backtest/` in the current tree.
+- `data/returns_with_gvkey.parquet` is required to run the full real-data backtest.
+
 ## Quick pipeline
 
 1. **Lead–lag matrix (full sample, edge-level scores).** Choose `score`: `tstat_diff` (default), `beta_diff`, `cross_corr`, `regression_r2`, `granger`, `levy`.
@@ -78,6 +88,34 @@ From the repo root you can also run `python scripts/backtest_leadlag.py` (and th
    ```
 
    Outputs (default): **multi-column** `results/backtest/daily_strategy.csv` (`main`, `random`, `momentum`, `structural`, `equal_weight`), `results/backtest/summary_comparison.csv` (Sharpe and other metrics per leg), and `results/backtest/summary.json` (main strategy only). Use `--no_compare` to run **only** the main leg and write a single-column CSV.
+
+### Real backtesting controls
+
+The backtest engine now supports a configurable net-of-cost path and risk overlays:
+
+- **Costs at execution:** `commission_bps`, `slippage_bps` applied on rebalance turnover, plus daily `borrow_bps_annual` on short notional.
+- **Diagnostics:** output includes net return, gross return, daily cost, and daily turnover series per strategy.
+- **Risk overlays:** optional `max_abs_weight` cap, `beta_neutralize` (with `market_gvkey` and `beta_lookback_rows`), and `sector_neutralize` (with `sector_map_csv` containing `gvkey,sector`).
+
+Example (once returns parquet is available):
+
+```bash
+python scripts/backtest_leadlag.py \
+  --returns_parquet data/returns_with_gvkey.parquet \
+  --edges_csv data/merged_edges.csv \
+  --score tstat_diff --rank_method cluster_eigen --n_clusters 6 \
+  --lookback_rows 504 --rebalance_freq BME --q 0.2 \
+  --commission_bps 2.0 --slippage_bps 3.0 --borrow_bps_annual 50.0 \
+  --max_abs_weight 0.05 --beta_neutralize --market_gvkey 001690 --beta_lookback_rows 252 \
+  --sector_neutralize --sector_map_csv data/gvkey_sector_map.csv \
+  --progress
+```
+
+Interpretation:
+- `main` is **net** return after all enabled costs.
+- `main_gross` is before costs.
+- `main_cost` is total daily cost drag in return units.
+- `main_turnover` is one-way turnover applied at rebalance transitions.
 
 ### Backtest baselines (same rebalances, same \(q\))
 

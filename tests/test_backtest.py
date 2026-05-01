@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from supply_chain_leadlag.backtest import (
+    apply_risk_overlays,
     comparison_metrics_table,
     grid_search_main_backtest,
     long_short_weights,
@@ -162,3 +163,45 @@ def test_run_rolling_cluster_rank_smoke():
         max_rebalances=2,
     )
     assert len(res.daily_ret) == len(R)
+
+
+def test_cost_model_deducts_from_gross():
+    R = _synth_panel(n=260, n_stock=30)
+    e = _synth_edges([f"{i:06d}" for i in range(1, 31)])
+    e["date"] = pd.to_datetime(e["srcdate"])
+    res = run_rolling_long_short(
+        R,
+        e,
+        lookback_rows=120,
+        rebalance_freq="BME",
+        score="cross_corr",
+        min_obs=40,
+        max_lag=3,
+        winsor_q=None,
+        max_rebalances=3,
+        commission_bps=10.0,
+        slippage_bps=5.0,
+        borrow_bps_annual=100.0,
+    )
+    valid = res.daily_ret.notna()
+    assert valid.any()
+    assert (res.gross_daily_ret[valid] >= res.daily_ret[valid]).all()
+    assert (res.daily_cost[valid] >= 0).all()
+    assert res.turnover.sum() > 0
+
+
+def test_apply_risk_overlays_sector_and_beta():
+    w = pd.Series([0.6, 0.4, -0.6, -0.4], index=["a", "b", "c", "d"])
+    betas = pd.Series([1.2, 0.8, 1.1, 0.9], index=w.index)
+    sectors = pd.Series({"a": "tech", "b": "tech", "c": "ind", "d": "ind"})
+    w2 = apply_risk_overlays(
+        w,
+        max_abs_weight=0.5,
+        beta_neutralize=True,
+        betas=betas,
+        sector_neutralize=True,
+        sector_map=sectors,
+    )
+    assert float(w2.abs().max()) <= 0.5 + 1e-12
+    exp = float((w2 * betas).sum())
+    assert abs(exp) < 1e-8

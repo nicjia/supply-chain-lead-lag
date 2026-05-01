@@ -19,6 +19,17 @@ ranking:
 
 backtest:
   max_rebalances: null
+  # Realism controls (all optional; defaults preserve old behavior).
+  commission_bps: 0.0
+  slippage_bps: 0.0
+  borrow_bps_annual: 0.0
+  # Risk overlays.
+  max_abs_weight: null
+  beta_neutralize: false
+  beta_lookback_rows: 252
+  market_gvkey: null
+  sector_neutralize: false
+  sector_map_csv: null
 
 outputs:
   daily_csv: results/backtest/daily_strategy.csv

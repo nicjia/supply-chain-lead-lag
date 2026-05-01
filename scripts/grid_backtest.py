@@ -10,6 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -43,6 +45,15 @@ def main():
     ap.add_argument("--n_clusters", type=int, default=None)
     ap.add_argument("--cluster_random_state", type=int, default=None)
     ap.add_argument("--max_rebalances", type=int, default=None)
+    ap.add_argument("--commission_bps", type=float, default=None)
+    ap.add_argument("--slippage_bps", type=float, default=None)
+    ap.add_argument("--borrow_bps_annual", type=float, default=None)
+    ap.add_argument("--max_abs_weight", type=float, default=None)
+    ap.add_argument("--beta_neutralize", action="store_true")
+    ap.add_argument("--beta_lookback_rows", type=int, default=None)
+    ap.add_argument("--market_gvkey", default=None)
+    ap.add_argument("--sector_neutralize", action="store_true")
+    ap.add_argument("--sector_map_csv", default=None)
     ap.add_argument(
         "--n_clusters_grid",
         default=None,
@@ -85,6 +96,15 @@ def main():
         "max_rebalances",
         "n_clusters",
         "cluster_random_state",
+        "commission_bps",
+        "slippage_bps",
+        "borrow_bps_annual",
+        "max_abs_weight",
+        "beta_neutralize",
+        "beta_lookback_rows",
+        "market_gvkey",
+        "sector_neutralize",
+        "sector_map_csv",
     ):
         bundle[k] = run_m[k]
 
@@ -108,6 +128,24 @@ def main():
 
     R = load_returns_wide_by_gvkey(bundle["returns_parquet"])
     edges = load_edges(bundle["edges_csv"])
+    market_ret = None
+    if bundle.get("market_gvkey"):
+        mk = str(bundle["market_gvkey"])
+        if mk in R.columns:
+            market_ret = R[mk]
+        else:
+            raise ValueError(f"--market_gvkey {mk!r} not found in returns columns")
+    sector_map = None
+    if bundle.get("sector_map_csv"):
+        sm = pd.read_csv(str(bundle["sector_map_csv"]))
+        if not {"gvkey", "sector"}.issubset(sm.columns):
+            raise ValueError("sector_map_csv must include columns: gvkey, sector")
+        sector_map = (
+            sm.assign(gvkey=lambda d: d["gvkey"].astype(str).str.zfill(6))
+            .dropna(subset=["sector"])
+            .drop_duplicates("gvkey")
+            .set_index("gvkey")["sector"]
+        )
 
     scores = bundle["scores"]
     rank_methods = bundle["rank_methods"] or ["leadingness", "spectral"]
@@ -144,6 +182,15 @@ def main():
         n_clusters=int(bundle["n_clusters"]),
         cluster_random_state=int(bundle["cluster_random_state"]),
         hybrid_alpha=bundle.get("hybrid_alpha"),
+        commission_bps=float(bundle["commission_bps"]),
+        slippage_bps=float(bundle["slippage_bps"]),
+        borrow_bps_annual=float(bundle["borrow_bps_annual"]),
+        max_abs_weight=bundle.get("max_abs_weight"),
+        beta_neutralize=bool(bundle.get("beta_neutralize", False)),
+        beta_lookback_rows=int(bundle["beta_lookback_rows"]),
+        market_ret=market_ret,
+        sector_neutralize=bool(bundle.get("sector_neutralize", False)),
+        sector_map=sector_map,
     )
 
     out = Path(bundle["out_csv"])

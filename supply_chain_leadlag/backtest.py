@@ -143,6 +143,9 @@ def expand_to_columns(w: pd.Series, R: pd.DataFrame) -> pd.Series:
 @dataclass
 class BacktestResult:
     daily_ret: pd.Series
+    gross_daily_ret: pd.Series
+    daily_cost: pd.Series
+    turnover: pd.Series
     cumulative: pd.Series
     rebalance_log: pd.DataFrame
 
@@ -152,6 +155,9 @@ def _daily_returns_from_events(
     events: list[tuple[pd.Timestamp, pd.Series]],
     *,
     name: str = "ret",
+    commission_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    borrow_bps_annual: float = 0.0,
 ) -> BacktestResult:
     R = R.sort_index()
     idx = R.index
@@ -167,28 +173,134 @@ def _daily_returns_from_events(
         )
 
     daily_rets: list[float] = []
+    gross_daily_rets: list[float] = []
+    daily_costs: list[float] = []
+    daily_turnover: list[float] = []
     daily_dates: list[pd.Timestamp] = []
     ev_i = 0
     current_w: pd.Series | None = None
+    prev_w: pd.Series | None = None
 
     for d in idx:
         d = pd.Timestamp(d)
+        turnover = 0.0
         while ev_i < len(events) and events[ev_i][0] < d:
             current_w = events[ev_i][1]
+            if prev_w is None:
+                turnover += 0.5 * float(current_w.abs().sum())
+            else:
+                aligned_prev = prev_w.reindex(current_w.index).fillna(0.0)
+                turnover += 0.5 * float((current_w - aligned_prev).abs().sum())
+            prev_w = current_w.copy()
             ev_i += 1
         if current_w is None:
             daily_rets.append(np.nan)
+            gross_daily_rets.append(np.nan)
+            daily_costs.append(0.0)
+            daily_turnover.append(0.0)
             daily_dates.append(d)
             continue
         r_row = R.loc[d]
-        pr = float((current_w * r_row.reindex(current_w.index).fillna(0.0)).sum())
-        daily_rets.append(pr if np.isfinite(pr) else np.nan)
+        gross = float((current_w * r_row.reindex(current_w.index).fillna(0.0)).sum())
+        short_notional = float((-current_w.clip(upper=0.0)).sum())
+        turnover_cost = turnover * (commission_bps + slippage_bps) / 1e4
+        borrow_cost = short_notional * borrow_bps_annual / 1e4 / 252.0
+        total_cost = turnover_cost + borrow_cost
+        net = gross - total_cost
+        gross_daily_rets.append(gross if np.isfinite(gross) else np.nan)
+        daily_rets.append(net if np.isfinite(net) else np.nan)
+        daily_costs.append(total_cost)
+        daily_turnover.append(turnover)
         daily_dates.append(d)
 
     sret = pd.Series(daily_rets, index=pd.DatetimeIndex(daily_dates), name=name)
+    gross_ret = pd.Series(gross_daily_rets, index=pd.DatetimeIndex(daily_dates), name=f"{name}_gross")
+    cost_ser = pd.Series(daily_costs, index=pd.DatetimeIndex(daily_dates), name=f"{name}_cost")
+    turnover_ser = pd.Series(daily_turnover, index=pd.DatetimeIndex(daily_dates), name=f"{name}_turnover")
     cum = (1.0 + sret.fillna(0.0)).cumprod() - 1.0
     log_df = pd.DataFrame(log_rows) if log_rows else pd.DataFrame()
-    return BacktestResult(daily_ret=sret, cumulative=cum, rebalance_log=log_df)
+    return BacktestResult(
+        daily_ret=sret,
+        gross_daily_ret=gross_ret,
+        daily_cost=cost_ser,
+        turnover=turnover_ser,
+        cumulative=cum,
+        rebalance_log=log_df,
+    )
+
+
+def _normalize_long_short_weights(w: pd.Series) -> pd.Series:
+    if w.empty:
+        return w
+    out = w.copy()
+    long_sum = float(out.clip(lower=0.0).sum())
+    short_sum = float((-out.clip(upper=0.0)).sum())
+    if long_sum > 0:
+        out[out > 0] = out[out > 0] / long_sum
+    if short_sum > 0:
+        out[out < 0] = out[out < 0] / short_sum
+    if long_sum > 0 and short_sum > 0:
+        out = out - out.mean()
+    return out
+
+
+def _estimate_betas(
+    R_win: pd.DataFrame,
+    market_ret: pd.Series,
+    beta_lookback_rows: int,
+) -> pd.Series:
+    if market_ret.empty:
+        return pd.Series(dtype=float)
+    m = market_ret.reindex(R_win.index).dropna()
+    if m.empty:
+        return pd.Series(dtype=float)
+    m = m.iloc[-min(beta_lookback_rows, len(m)) :]
+    if len(m) < 10 or float(m.var()) <= 1e-12:
+        return pd.Series(dtype=float)
+    X = m - m.mean()
+    var_x = float((X * X).sum())
+    out: dict[str, float] = {}
+    for c in R_win.columns:
+        y = R_win[c].reindex(m.index).dropna()
+        if len(y) < 10:
+            continue
+        z = (y - y.mean()).reindex(m.index).fillna(0.0)
+        out[c] = float((z * X).sum() / var_x)
+    return pd.Series(out, dtype=float)
+
+
+def apply_risk_overlays(
+    w: pd.Series,
+    *,
+    max_abs_weight: float | None = None,
+    beta_neutralize: bool = False,
+    betas: pd.Series | None = None,
+    sector_neutralize: bool = False,
+    sector_map: pd.Series | None = None,
+) -> pd.Series:
+    out = w.copy()
+    if out.empty:
+        return out
+
+    if sector_neutralize and sector_map is not None and not sector_map.empty:
+        aligned_sector = sector_map.reindex(out.index)
+        for _, ix in aligned_sector.dropna().groupby(aligned_sector.dropna()).groups.items():
+            grp = out.loc[ix]
+            out.loc[ix] = grp - grp.mean()
+
+    if max_abs_weight is not None and max_abs_weight > 0:
+        out = out.clip(lower=-max_abs_weight, upper=max_abs_weight)
+
+    out = _normalize_long_short_weights(out)
+    if beta_neutralize and betas is not None and not betas.empty:
+        b = betas.reindex(out.index).fillna(0.0)
+        denom = float((b * b).sum())
+        if denom > 1e-12:
+            lam = float((out * b).sum()) / denom
+            out = out - lam * b
+            if max_abs_weight is not None and max_abs_weight > 0:
+                out = out.clip(lower=-max_abs_weight, upper=max_abs_weight)
+    return out
 
 
 @dataclass
@@ -224,6 +336,15 @@ def run_rolling_comparison(
     baseline_seed: int = 0,
     include_baselines: bool = True,
     hybrid_alpha: float | None = None,
+    commission_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    borrow_bps_annual: float = 0.0,
+    max_abs_weight: float | None = None,
+    beta_neutralize: bool = False,
+    beta_lookback_rows: int = 252,
+    market_ret: pd.Series | None = None,
+    sector_neutralize: bool = False,
+    sector_map: pd.Series | None = None,
     show_progress: bool = False,
 ) -> ComparisonResult:
     """
@@ -306,6 +427,15 @@ def run_rolling_comparison(
             cluster_random_state=cluster_random_state,
         )
         w_main = long_short_weights(sc, q=q, long_high=long_high)
+        betas = _estimate_betas(R_win, market_ret, beta_lookback_rows) if (beta_neutralize and market_ret is not None) else None
+        w_main = apply_risk_overlays(
+            w_main,
+            max_abs_weight=max_abs_weight,
+            beta_neutralize=beta_neutralize,
+            betas=betas,
+            sector_neutralize=sector_neutralize,
+            sector_map=sector_map,
+        )
         if w_main.empty or w_main.abs().sum() == 0:
             continue
 
@@ -315,11 +445,27 @@ def run_rolling_comparison(
         if include_baselines:
             rng = np.random.default_rng((baseline_seed + int(pd.Timestamp(T).value)) % (2**32))
             w_rand = long_short_weights(shuffle_scores(sc, rng), q=q, long_high=long_high)
+            w_rand = apply_risk_overlays(
+                w_rand,
+                max_abs_weight=max_abs_weight,
+                beta_neutralize=beta_neutralize,
+                betas=betas,
+                sector_neutralize=sector_neutralize,
+                sector_map=sector_map,
+            )
             if not w_rand.empty:
                 events_rand.append((T, expand_to_columns(w_rand, R)))
 
             sc_mom = momentum_scores(R_win, momentum_window).reindex(sc.index).fillna(0.0)
             w_mom = long_short_weights(sc_mom, q=q, long_high=long_high)
+            w_mom = apply_risk_overlays(
+                w_mom,
+                max_abs_weight=max_abs_weight,
+                beta_neutralize=beta_neutralize,
+                betas=betas,
+                sector_neutralize=sector_neutralize,
+                sector_map=sector_map,
+            )
             if not w_mom.empty:
                 events_mom.append((T, expand_to_columns(w_mom, R)))
 
@@ -327,6 +473,14 @@ def run_rolling_comparison(
             sc_str = structural_leadingness_scores(e_pit, nodes).reindex(sc.index)
             sc_str = sc_str.fillna(0.0)
             w_str = long_short_weights(sc_str, q=q, long_high=long_high)
+            w_str = apply_risk_overlays(
+                w_str,
+                max_abs_weight=max_abs_weight,
+                beta_neutralize=beta_neutralize,
+                betas=betas,
+                sector_neutralize=sector_neutralize,
+                sector_map=sector_map,
+            )
             if not w_str.empty:
                 events_str.append((T, expand_to_columns(w_str, R)))
 
@@ -334,10 +488,20 @@ def run_rolling_comparison(
             if not w_ew.empty:
                 events_ew.append((T, expand_to_columns(w_ew, R)))
 
-    main_bt = _daily_returns_from_events(R, events_main, name="main")
+    main_bt = _daily_returns_from_events(
+        R,
+        events_main,
+        name="main",
+        commission_bps=commission_bps,
+        slippage_bps=slippage_bps,
+        borrow_bps_annual=borrow_bps_annual,
+    )
     if not include_baselines:
         empty = BacktestResult(
             daily_ret=pd.Series(dtype=float, name="empty"),
+            gross_daily_ret=pd.Series(dtype=float, name="empty_gross"),
+            daily_cost=pd.Series(dtype=float, name="empty_cost"),
+            turnover=pd.Series(dtype=float, name="empty_turnover"),
             cumulative=pd.Series(dtype=float),
             rebalance_log=pd.DataFrame(),
         )
@@ -351,10 +515,38 @@ def run_rolling_comparison(
 
     return ComparisonResult(
         main=main_bt,
-        random=_daily_returns_from_events(R, events_rand, name="random"),
-        momentum=_daily_returns_from_events(R, events_mom, name="momentum"),
-        structural=_daily_returns_from_events(R, events_str, name="structural"),
-        equal_weight=_daily_returns_from_events(R, events_ew, name="equal_weight"),
+        random=_daily_returns_from_events(
+            R,
+            events_rand,
+            name="random",
+            commission_bps=commission_bps,
+            slippage_bps=slippage_bps,
+            borrow_bps_annual=borrow_bps_annual,
+        ),
+        momentum=_daily_returns_from_events(
+            R,
+            events_mom,
+            name="momentum",
+            commission_bps=commission_bps,
+            slippage_bps=slippage_bps,
+            borrow_bps_annual=borrow_bps_annual,
+        ),
+        structural=_daily_returns_from_events(
+            R,
+            events_str,
+            name="structural",
+            commission_bps=commission_bps,
+            slippage_bps=slippage_bps,
+            borrow_bps_annual=borrow_bps_annual,
+        ),
+        equal_weight=_daily_returns_from_events(
+            R,
+            events_ew,
+            name="equal_weight",
+            commission_bps=commission_bps,
+            slippage_bps=slippage_bps,
+            borrow_bps_annual=borrow_bps_annual,
+        ),
     )
 
 
@@ -377,6 +569,15 @@ def run_rolling_long_short(
     winsor_q: float | None = 0.001,
     max_rebalances: int | None = None,
     hybrid_alpha: float | None = None,
+    commission_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    borrow_bps_annual: float = 0.0,
+    max_abs_weight: float | None = None,
+    beta_neutralize: bool = False,
+    beta_lookback_rows: int = 252,
+    market_ret: pd.Series | None = None,
+    sector_neutralize: bool = False,
+    sector_map: pd.Series | None = None,
     show_progress: bool = False,
 ) -> BacktestResult:
     """Lead–lag long–short only; skips baseline portfolios (faster)."""
@@ -399,6 +600,15 @@ def run_rolling_long_short(
         max_rebalances=max_rebalances,
         include_baselines=False,
         hybrid_alpha=hybrid_alpha,
+        commission_bps=commission_bps,
+        slippage_bps=slippage_bps,
+        borrow_bps_annual=borrow_bps_annual,
+        max_abs_weight=max_abs_weight,
+        beta_neutralize=beta_neutralize,
+        beta_lookback_rows=beta_lookback_rows,
+        market_ret=market_ret,
+        sector_neutralize=sector_neutralize,
+        sector_map=sector_map,
         show_progress=show_progress,
     ).main
 
@@ -418,7 +628,12 @@ def comparison_metrics_table(comp: ComparisonResult) -> pd.DataFrame:
         if res.daily_ret.empty or res.daily_ret.notna().sum() == 0:
             rows.append({"strategy": label, "sharpe": np.nan, "n_days": 0})
             continue
-        m = portfolio_metrics(res.daily_ret)
+        m = portfolio_metrics(
+            res.daily_ret,
+            gross_daily_ret=res.gross_daily_ret,
+            daily_cost=res.daily_cost,
+            turnover=res.turnover,
+        )
         m = {"strategy": label, **m}
         rows.append(m)
     return pd.DataFrame(rows)

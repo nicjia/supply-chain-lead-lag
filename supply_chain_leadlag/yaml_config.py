@@ -61,6 +61,17 @@ def flat_backtest_run_params(cfg: dict[str, Any]) -> dict[str, Any]:
         "momentum_window": int(bt.get("momentum_window", 20)),
         "baseline_seed": int(bt.get("baseline_seed", 0)),
         "compare_baselines": bool(bt.get("compare_baselines", True)),
+        "commission_bps": float(bt.get("commission_bps", 0.0)),
+        "slippage_bps": float(bt.get("slippage_bps", 0.0)),
+        "borrow_bps_annual": float(bt.get("borrow_bps_annual", 0.0)),
+        "max_abs_weight": (
+            float(bt.get("max_abs_weight")) if bt.get("max_abs_weight") is not None else None
+        ),
+        "beta_neutralize": bool(bt.get("beta_neutralize", False)),
+        "beta_lookback_rows": int(bt.get("beta_lookback_rows", 252)),
+        "market_gvkey": bt.get("market_gvkey"),
+        "sector_neutralize": bool(bt.get("sector_neutralize", False)),
+        "sector_map_csv": bt.get("sector_map_csv"),
         "out_csv": out.get("daily_csv", "results/backtest/daily_strategy.csv"),
         "out_summary": out.get("summary_json", "results/backtest/summary.json"),
         "out_comparison": out.get("comparison_csv", "results/backtest/summary_comparison.csv"),
@@ -102,6 +113,13 @@ def merge_backtest_cli(flat: dict[str, Any], args: Any) -> dict[str, Any]:
         "max_rebalances",
         "momentum_window",
         "baseline_seed",
+        "commission_bps",
+        "slippage_bps",
+        "borrow_bps_annual",
+        "max_abs_weight",
+        "beta_lookback_rows",
+        "market_gvkey",
+        "sector_map_csv",
         "out_csv",
         "out_summary",
         "out_comparison",
@@ -111,6 +129,10 @@ def merge_backtest_cli(flat: dict[str, Any], args: Any) -> dict[str, Any]:
             m[key] = v
     if getattr(args, "no_compare", False):
         m["compare_baselines"] = False
+    if getattr(args, "beta_neutralize", False):
+        m["beta_neutralize"] = True
+    if getattr(args, "sector_neutralize", False):
+        m["sector_neutralize"] = True
     return m
 
 
@@ -174,6 +196,15 @@ def grid_search_bundle(cfg: dict[str, Any]) -> dict[str, Any]:
         "n_clusters": run["n_clusters"],
         "cluster_random_state": run["cluster_random_state"],
         "hybrid_alpha": run["hybrid_alpha"],
+        "commission_bps": run["commission_bps"],
+        "slippage_bps": run["slippage_bps"],
+        "borrow_bps_annual": run["borrow_bps_annual"],
+        "max_abs_weight": run["max_abs_weight"],
+        "beta_neutralize": run["beta_neutralize"],
+        "beta_lookback_rows": run["beta_lookback_rows"],
+        "market_gvkey": run["market_gvkey"],
+        "sector_neutralize": run["sector_neutralize"],
+        "sector_map_csv": run["sector_map_csv"],
         "n_clusters_grid": _grid_n_clusters_list(g),
         "max_rebalances_grid": _grid_max_rebalances_list(g),
     }

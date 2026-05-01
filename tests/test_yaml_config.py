@@ -15,6 +15,9 @@ def test_flat_defaults_empty_config():
     assert f["rank_method"] == "leadingness"
     assert f["compare_baselines"] is True
     assert f["hybrid_alpha"] is None
+    assert f["commission_bps"] == 0.0
+    assert f["beta_neutralize"] is False
+    assert f["sector_neutralize"] is False
 
 
 def test_load_repo_config_if_present():

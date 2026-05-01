@@ -77,10 +77,17 @@ def max_drawdown(cum: pd.Series) -> float:
     return float(dd.min())
 
 
-def portfolio_metrics(daily_ret: pd.Series, ann: int = 252) -> dict[str, Any]:
+def portfolio_metrics(
+    daily_ret: pd.Series,
+    ann: int = 252,
+    *,
+    gross_daily_ret: pd.Series | None = None,
+    daily_cost: pd.Series | None = None,
+    turnover: pd.Series | None = None,
+) -> dict[str, Any]:
     dr = daily_ret.dropna()
     pnl = (1.0 + dr.fillna(0.0)).cumprod() - 1.0
-    return {
+    out = {
         "sharpe": sharpe(dr, ann=ann),
         "mean_daily": float(dr.mean()),
         "vol_daily": float(dr.std()),
@@ -88,6 +95,20 @@ def portfolio_metrics(daily_ret: pd.Series, ann: int = 252) -> dict[str, Any]:
         "max_drawdown": max_drawdown(pnl),
         "n_days": int(dr.shape[0]),
     }
+    if gross_daily_ret is not None:
+        g = gross_daily_ret.dropna()
+        gpnl = (1.0 + g.fillna(0.0)).cumprod() - 1.0
+        out["gross_sharpe"] = sharpe(g, ann=ann)
+        out["gross_cum_return"] = float(gpnl.iloc[-1]) if len(gpnl) else np.nan
+    if daily_cost is not None:
+        dc = daily_cost.reindex(dr.index).fillna(0.0)
+        out["avg_daily_cost_bps"] = float(dc.mean() * 1e4)
+        out["total_cost"] = float(dc.sum())
+    if turnover is not None:
+        tv = turnover.reindex(dr.index).fillna(0.0)
+        out["avg_daily_turnover"] = float(tv.mean())
+        out["total_turnover"] = float(tv.sum())
+    return out
 
 
 def structural_summary(C: np.ndarray) -> dict[str, float]:
