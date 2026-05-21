@@ -48,13 +48,24 @@ def test_quick_pipeline_writes_outputs(tmp_path):
     required = [
         "summary_metrics.csv",
         "panel_forward_reverse.csv",
+        "horizon_decay.csv",
+        "spectral_summary.csv",
         "strategy_family_comparison.csv",
         "cluster_method_comparison.csv",
         "hybrid_alpha_sweep.csv",
         "event_conditioned_panel.csv",
+        "event_conditioned_backtest.csv",
+        "event_conditioned_results.csv",
         "cluster_stability.csv",
+        "turnover_costs.csv",
+        "factor_exposure_alpha.csv",
+        "daily_returns.csv",
+        "cumulative_returns.csv",
+        "drawdowns.csv",
         "report/final_report.md",
         "report/final_report.tex",
+        "plots/cumulative_pnl_by_strategy.png",
+        "plots/hybrid_alpha_sweep.png",
     ]
     for name in required:
         assert (out / name).is_file(), f"missing {name}"

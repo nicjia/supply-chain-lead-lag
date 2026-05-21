@@ -125,7 +125,7 @@ def mask_returns_by_condition(
         return daily_returns
     if condition not in flags.columns:
         return daily_returns * np.nan
-    m = flags[condition].reindex(daily_returns.index).fillna(False)
+    m = flags[condition].reindex(daily_returns.index).astype(bool).fillna(False)
     out = daily_returns.copy()
     out.loc[~m] = 0.0
     return out

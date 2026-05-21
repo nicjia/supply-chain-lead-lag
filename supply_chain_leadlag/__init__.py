@@ -1,5 +1,13 @@
 """Supply chain lead–lag: matrices, global rankings, signals, metrics, backtests."""
 
+from supply_chain_leadlag.clustering_methods import ClusteringMethodError, get_cluster_labels
+from supply_chain_leadlag.research_config import load_research_config
+from supply_chain_leadlag.research_pipeline import (
+    generate_final_report,
+    run_final_research_pipeline,
+    run_hybrid_alpha_sweep,
+)
+from supply_chain_leadlag.strategy_families import run_strategy_family
 from supply_chain_leadlag.backtest import (
     DEFAULT_SCORE_GRID,
     BacktestResult,
@@ -76,4 +84,11 @@ __all__ = [
     "run_rolling_long_short",
     "scores_from_result",
     "supplier_pressure_signal",
+    "get_cluster_labels",
+    "ClusteringMethodError",
+    "run_strategy_family",
+    "load_research_config",
+    "run_final_research_pipeline",
+    "run_hybrid_alpha_sweep",
+    "generate_final_report",
 ]

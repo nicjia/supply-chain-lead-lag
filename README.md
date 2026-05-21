@@ -16,6 +16,10 @@ Unified framework for **network-based lead–lag** between statistical return pr
 | `scripts/spectral_analysis.py` | Spectrum of \(H=iS\), optional permutation test for \(\lambda_{\max}\) |
 | `scripts/backtest_leadlag.py` | **Rolling** PIT long–short on real returns + edges → CSV + JSON summary |
 | `scripts/grid_backtest.py` | **Grid** over `score` × `rank_method` (main Sharpe); see README |
+| `config/research.yaml` | Final research pipeline defaults (strategy families, clustering, hybrid sweep) |
+| `scripts/run_final_research_pipeline.py` | Unified PIT research run → `results/final_research/` |
+| `scripts/run_hybrid_alpha_sweep.py` | Hybrid α sweep only (`hybrid_alpha_sweep.csv`) |
+| `scripts/make_final_report.py` | Regenerate `report/final_report.md` / `.tex` from results |
 
 ## Install
 

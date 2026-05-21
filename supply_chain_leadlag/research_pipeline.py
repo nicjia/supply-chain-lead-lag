@@ -34,6 +34,15 @@ from supply_chain_leadlag.matrix import build_lead_lag_matrix_gvkey, hybrid_matr
 from supply_chain_leadlag.research_config import flat_research_params, load_research_config
 from supply_chain_leadlag.signals import portfolio_metrics, predictability_ols
 from supply_chain_leadlag.stability import stability_row
+from supply_chain_leadlag.research_outputs import (
+    cluster_labels_to_frames,
+    drawdown_series,
+    factor_exposure_alpha,
+    holdings_from_events,
+    spectral_summary_from_C,
+    stability_by_method,
+    write_drawdowns_csv,
+)
 from supply_chain_leadlag.strategy_families import run_strategy_family
 from supply_chain_leadlag.yaml_config import load_yaml_config
 
@@ -116,10 +125,11 @@ def run_panel_forward_reverse(
     horizon_max: int = 5,
     edge_date_col: str = "filing_date",
     edge_expiry_days: int | None = 550,
+    panel_parquet: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Lightweight panel validation: supplier y_{t+h} ~ customer pressure at t.
-    Uses pooled OLS with gvkey demeaning (fallback when linearmodels unavailable).
+    Panel validation: supplier y_{t+h} ~ customer-pressure signal.
+    Uses ``linearmodels`` PanelOLS when panel parquet + dependency exist; else pooled OLS.
     """
     rows = []
     if isinstance(edges, pd.DataFrame):
@@ -169,6 +179,82 @@ def run_panel_forward_reverse(
     return pd.DataFrame(rows)
 
 
+def _panel_from_linearmodels_file(
+    panel_path: Path,
+    *,
+    direction: str,
+    signal_col: str,
+    entity_col: str,
+    ret_prefix: str,
+    horizon_max: int,
+) -> list[dict]:
+    from linearmodels.panel import PanelOLS
+
+    panel = pd.read_parquet(panel_path)
+    rows: list[dict] = []
+    df = panel.set_index([entity_col, "date"]).sort_index()
+    lag_cols = [c for c in df.columns if c.startswith(f"{ret_prefix}_r_lag_")][:5]
+    for h in range(1, horizon_max + 1):
+        ycol = f"{ret_prefix}_r_fwd_{h}"
+        if ycol not in df.columns or signal_col not in df.columns:
+            continue
+        X = df[[signal_col] + lag_cols].copy()
+        X["const"] = 1.0
+        mod = PanelOLS(df[ycol], X, entity_effects=True, time_effects=True)
+        res = mod.fit(cov_type="clustered", cluster_entity=True)
+        rows.append(
+            {
+                "direction": direction,
+                "horizon": h,
+                "beta": float(res.params[signal_col]),
+                "std_error": float(res.std_errors[signal_col]),
+                "t_stat": float(res.tstats[signal_col]),
+                "p_value": float(res.pvalues[signal_col]),
+                "n_obs": int(res.nobs),
+                "n_entities": int(df.index.get_level_values(0).nunique()),
+                "fixed_effects": "entity+time",
+                "clustered_se": True,
+                "condition": "all_days",
+            }
+        )
+    return rows
+
+
+def run_panel_with_parquet(root: Path, *, horizon_max: int) -> pd.DataFrame | None:
+    """Run PanelOLS on forward/reverse panel parquets if present."""
+    try:
+        from linearmodels.panel import PanelOLS  # noqa: F401
+    except ImportError:
+        return None
+
+    rows: list[dict] = []
+    fwd = root / "data" / "leadlag_panel_forward.parquet"
+    rev = root / "data" / "leadlag_panel_reverse.parquet"
+    if fwd.is_file():
+        rows.extend(
+            _panel_from_linearmodels_file(
+                fwd,
+                direction="forward_customer_to_supplier",
+                signal_col="y",
+                entity_col="supplier_gvkey",
+                ret_prefix="sup",
+                horizon_max=horizon_max,
+            )
+        )
+    if rev.is_file():
+        rows.extend(
+            _panel_from_linearmodels_file(
+                rev,
+                direction="reverse_supplier_to_customer",
+                signal_col="z",
+                entity_col="customer_gvkey",
+                ret_prefix="cust",
+                horizon_max=horizon_max,
+            )
+        )
+    return pd.DataFrame(rows) if rows else None
+
+
 def _accumulate_family_returns(
     R: pd.DataFrame,
     edges: pd.DataFrame,
@@ -178,7 +264,8 @@ def _accumulate_family_returns(
     hybrid_alpha: float | None = None,
     max_rebalances: int | None = None,
     quick: bool = False,
-) -> tuple[pd.Series, list[dict], dict]:
+    collect_cluster_labels: bool = True,
+) -> tuple[pd.Series, list[dict], dict, list[dict], list[tuple[pd.Timestamp, pd.Series]]]:
     """Rolling PIT loop for one (family, cluster_method, alpha)."""
     idx = R.index.sort_values()
     start, end = idx.min(), idx.max()
@@ -194,6 +281,8 @@ def _accumulate_family_returns(
     last_labels: pd.Series | None = None
     last_C: pd.DataFrame | None = None
     n_reb = 0
+    cluster_label_records: list[dict] = []
+    weight_events: list[tuple[pd.Timestamp, pd.Series]] = []
 
     for i, T in enumerate(rebalances):
         T = pd.Timestamp(T)
@@ -233,6 +322,18 @@ def _accumulate_family_returns(
         except ClusteringMethodError:
             labels = None
 
+        if labels is not None and collect_cluster_labels:
+            family_tag = params.get("_family", "unknown")
+            for gv, lab in labels.items():
+                cluster_label_records.append(
+                    {
+                        "rebalance_date": T,
+                        "gvkey": str(gv),
+                        "cluster_method": cluster_method,
+                        "cluster_label": int(lab),
+                        "strategy_family": family_tag,
+                    }
+                )
         if labels is not None:
             stability_rows.append(
                 stability_row(
@@ -278,12 +379,14 @@ def _accumulate_family_returns(
 
         dr = out["daily_returns"].reindex(idx).fillna(0.0)
         daily_acc = daily_acc + dr
+        if family == "supplier_pressure":
+            weight_events.extend(out.get("events", []))
         n_reb += 1
         if quick and n_reb >= 3:
             break
 
     meta = {"n_rebalances": n_reb, "cluster_method": cluster_method, "hybrid_alpha": hybrid_alpha}
-    return daily_acc, stability_rows, meta
+    return daily_acc, stability_rows, meta, cluster_label_records, weight_events
 
 
 def run_final_research_pipeline(
@@ -300,15 +403,16 @@ def run_final_research_pipeline(
     if max_rebalances is not None:
         params["max_rebalances"] = max_rebalances
     elif quick:
-        params["max_rebalances"] = 3
+        params["max_rebalances"] = min(params.get("max_rebalances") or 3, 3)
         params["hybrid_alpha_grid"] = [0.0, 0.5, 1.0]
-        params["cluster_methods"] = ["symmetric_spectral", "hermitian", "supply_community"]
+        params["cluster_methods"] = ["hermitian"]
         params["strategy_families"] = [
             "supplier_pressure",
             "globalrank",
             "metacluster",
             "clusterrank",
         ]
+        params["baselines_include"] = False
 
     out_dir = Path(params["output_dir"])
     if not out_dir.is_absolute():
@@ -349,47 +453,78 @@ def run_final_research_pipeline(
         yaml.safe_dump(raw_cfg or params, f, sort_keys=False)
 
     # Panel
-    panel_df = run_panel_forward_reverse(
-        R,
-        edges,
-        horizon_max=params["panel_horizon_max"],
-        edge_date_col=params["edge_date_col"],
-        edge_expiry_days=params["edge_expiry_days"],
-    )
+    panel_df = run_panel_with_parquet(root, horizon_max=params["panel_horizon_max"])
+    if panel_df is None or panel_df.empty:
+        panel_df = run_panel_forward_reverse(
+            R,
+            edges,
+            horizon_max=params["panel_horizon_max"],
+            edge_date_col=params["edge_date_col"],
+            edge_expiry_days=params["edge_expiry_days"],
+        )
+    else:
+        warnings.append("panel: used linearmodels on leadlag_panel_forward/reverse.parquet")
     panel_df.to_csv(out_dir / "panel_forward_reverse.csv", index=False)
     horizon_df = panel_df.copy()
     if not horizon_df.empty:
         horizon_df["economic_magnitude_bps"] = horizon_df["beta"] * 1e4
     horizon_df.to_csv(out_dir / "horizon_decay.csv", index=False)
 
-    # Baselines via existing runner
-    comp = run_rolling_comparison(
-        R,
-        edges,
-        lookback_rows=params["lookback_rows"],
-        rebalance_freq=params["rebalance_freq"],
-        score=params["edge_score"],
-        signal_method="supplier_pressure",
-        max_rebalances=params["max_rebalances"],
-        edge_expiry_days=params["edge_expiry_days"],
-        include_baselines=params["baselines_include"],
-        commission_bps=params["commission_bps"],
-        slippage_bps=params["slippage_bps"],
-        borrow_bps_annual=params["borrow_bps_annual"],
-    )
-    comp_tab = comparison_metrics_table(comp)
+    # Baselines via existing runner (skipped in quick mode for speed)
+    if params["baselines_include"] and not quick:
+        comp = run_rolling_comparison(
+            R,
+            edges,
+            lookback_rows=params["lookback_rows"],
+            rebalance_freq=params["rebalance_freq"],
+            score=params["edge_score"],
+            signal_method="supplier_pressure",
+            max_rebalances=params["max_rebalances"],
+            edge_expiry_days=params["edge_expiry_days"],
+            include_baselines=True,
+            commission_bps=params["commission_bps"],
+            slippage_bps=params["slippage_bps"],
+            borrow_bps_annual=params["borrow_bps_annual"],
+        )
+        comp_tab = comparison_metrics_table(comp)
+    else:
+        from supply_chain_leadlag.backtest import BacktestResult, ComparisonResult
+
+        empty_bt = BacktestResult(
+            daily_ret=pd.Series(dtype=float),
+            gross_daily_ret=pd.Series(dtype=float),
+            daily_cost=pd.Series(dtype=float),
+            turnover=pd.Series(dtype=float),
+            cumulative=pd.Series(dtype=float),
+            rebalance_log=pd.DataFrame(),
+        )
+        comp = ComparisonResult(
+            main=empty_bt,
+            random=empty_bt,
+            momentum=empty_bt,
+            structural=empty_bt,
+            equal_weight=empty_bt,
+        )
+        comp_tab = pd.DataFrame()
+        if quick:
+            warnings.append("quick mode: baselines skipped")
 
     # Strategy families
     family_rows = []
     all_daily: dict[str, pd.Series] = {}
     stability_all: list[dict] = []
+    all_cluster_labels: list[dict] = []
+    supplier_weight_events: list[tuple[pd.Timestamp, pd.Series]] = []
     default_cluster = "hermitian"
     max_reb = params["max_rebalances"]
+    res_last = None
+    labels_last: pd.Series | None = None
+    F_last: np.ndarray | None = None
 
     for family in params["strategy_families"]:
         p = dict(params)
         p["_family"] = family
-        dr, stab, _ = _accumulate_family_returns(
+        dr, stab, _, clab, wevents = _accumulate_family_returns(
             R,
             edges,
             p,
@@ -398,6 +533,9 @@ def run_final_research_pipeline(
             max_rebalances=max_reb,
             quick=quick,
         )
+        all_cluster_labels.extend(clab)
+        if family == "supplier_pressure":
+            supplier_weight_events = wevents
         all_daily[family] = dr
         stability_all.extend(stab)
         met = _metrics_from_returns(dr)
@@ -419,11 +557,18 @@ def run_final_research_pipeline(
 
     pd.DataFrame(family_rows).to_csv(out_dir / "strategy_family_comparison.csv", index=False)
 
-    # Cluster method comparison (supplier_pressure + metacluster/clusterrank)
+    # Cluster method comparison — all methods in config (sector skipped if no map)
     cluster_rows = []
-    cm_list = params["cluster_methods"]
-    if quick:
-        cm_list = [c for c in cm_list if c not in ("sector", "hybrid_prior")][:3]
+    cm_list = list(params["cluster_methods"])
+    if not quick:
+        cm_list = list(dict.fromkeys(cm_list + [
+            "sector",
+            "supply_community",
+            "symmetric_spectral",
+            "hermitian",
+            "signed",
+            "hybrid_prior",
+        ]))
     for cm in cm_list:
         fam_list = ("supplier_pressure",) if quick else ("supplier_pressure", "metacluster", "clusterrank")
         for family in fam_list:
@@ -431,14 +576,16 @@ def run_final_research_pipeline(
                 p = dict(params)
                 p["_family"] = family
                 try:
-                    dr, stab, meta = _accumulate_family_returns(
+                    dr, stab, meta, clab, _ = _accumulate_family_returns(
                         R,
                         edges,
                         p,
                         cluster_method=cm,
                         max_rebalances=max_reb,
                         quick=quick,
+                        collect_cluster_labels=(cm == default_cluster),
                     )
+                    all_cluster_labels.extend(clab)
                 except ClusteringMethodError:
                     cluster_rows.append(
                         {
@@ -480,7 +627,7 @@ def run_final_research_pipeline(
         for family in hybrid_families:
             p = dict(params)
             p["_family"] = family
-            dr, stab, _ = _accumulate_family_returns(
+            dr, stab, _, _, _ = _accumulate_family_returns(
                 R,
                 edges,
                 p,
@@ -488,6 +635,7 @@ def run_final_research_pipeline(
                 hybrid_alpha=float(alpha),
                 max_rebalances=max_reb,
                 quick=quick,
+                collect_cluster_labels=False,
             )
             met = _metrics_from_returns(dr)
             ari_mean = float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan
@@ -629,7 +777,23 @@ def run_final_research_pipeline(
         )
     pd.DataFrame(turnover_rows).to_csv(out_dir / "turnover_costs.csv", index=False)
 
-    # Last matrices
+    # Cluster label artifacts
+    lab_df, size_df = cluster_labels_to_frames(all_cluster_labels)
+    if not lab_df.empty:
+        lab_df.to_parquet(out_dir / "clusters" / "cluster_labels_by_rebalance.parquet", index=False)
+        size_df.to_csv(out_dir / "clusters" / "cluster_sizes.csv", index=False)
+    stab_df = pd.DataFrame(stability_all)
+    if not stab_df.empty:
+        stability_by_method(stab_df).to_csv(
+            out_dir / "clusters" / "cluster_stability_by_method.csv", index=False
+        )
+
+    # Holdings / weights
+    holdings = holdings_from_events(supplier_weight_events, "supplier_pressure")
+    if not holdings.empty:
+        holdings.to_parquet(out_dir / "holdings_or_weights.parquet", index=False)
+
+    # Last matrices + spectral summary
     try:
         e_last = filter_edges_pit(edges, R.index[-1], expiry_days=params["edge_expiry_days"])
         R_win = returns_window(R, R.index[-1], params["lookback_rows"])
@@ -664,15 +828,32 @@ def run_final_research_pipeline(
             res_last.C.reindex(index=labels.index, columns=labels.index, fill_value=0.0).to_numpy(),
             labels.astype(int).to_numpy(),
         )
+        F_last = F
         pd.DataFrame(F).to_parquet(out_dir / "matrices" / "meta_flow_matrix_last.parquet")
+        labels_last = labels
+        spec_row, _ = spectral_summary_from_C(res_last.C)
+        spec_row.to_csv(out_dir / "spectral_summary.csv", index=False)
     except Exception as exc:
         warnings.append(f"last matrix artifacts: {exc}")
+        spec_row = pd.DataFrame(
+            [{"lambda_max_H": np.nan, "fro_norm_C": np.nan, "obs_max_eig_perm": np.nan, "perm_p_value": np.nan}]
+        )
+        spec_row.to_csv(out_dir / "spectral_summary.csv", index=False)
 
     # Daily returns aggregate
     daily_df = pd.DataFrame(all_daily)
     daily_df.to_csv(out_dir / "daily_returns.csv")
     cum = (1 + daily_df.fillna(0)).cumprod() - 1
     cum.to_csv(out_dir / "cumulative_returns.csv")
+    write_drawdowns_csv(daily_df, out_dir / "drawdowns.csv")
+
+    # Factor exposure
+    mkt = None
+    if params.get("market_gvkey"):
+        mgv = str(params["market_gvkey"]).zfill(6)
+        if mgv in R.columns:
+            mkt = R[mgv]
+    factor_exposure_alpha(daily_df, mkt).to_csv(out_dir / "factor_exposure_alpha.csv", index=False)
 
     # Metadata
     meta = {
@@ -693,10 +874,101 @@ def run_final_research_pipeline(
     with open(out_dir / "run_metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    _write_plots(out_dir, panel_df, family_rows, hybrid_rows, cluster_rows, all_daily, comp_tab, stability_all)
+    _write_plots(
+        out_dir,
+        panel_df,
+        family_rows,
+        hybrid_rows,
+        cluster_rows,
+        all_daily,
+        comp_tab,
+        stability_all,
+        bt_event_rows=bt_event_rows,
+        res_last=res_last,
+        labels_last=labels_last,
+        F_last=F_last,
+        turnover_rows=turnover_rows,
+    )
     generate_final_report(out_dir, params)
 
     return out_dir
+
+
+def run_hybrid_alpha_sweep(
+    config_path: str | Path | None = None,
+    *,
+    max_rebalances: int | None = None,
+    quick: bool = False,
+    repo_root: Path | None = None,
+) -> Path:
+    """Run only hybrid alpha sweep + plot (writes hybrid_alpha_sweep.csv)."""
+    root = repo_root or Path(__file__).resolve().parents[1]
+    raw_cfg = load_yaml_config(config_path or root / "config" / "research.yaml")
+    params = flat_research_params(raw_cfg)
+    if max_rebalances is not None:
+        params["max_rebalances"] = max_rebalances
+    if quick:
+        params["max_rebalances"] = 3
+        params["hybrid_alpha_grid"] = [0.0, 0.5, 1.0]
+
+    out_dir = Path(params["output_dir"])
+    if not out_dir.is_absolute():
+        out_dir = root / out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "plots").mkdir(exist_ok=True)
+
+    returns_path = root / params["returns_parquet"]
+    R = (
+        load_returns_wide_by_gvkey(str(returns_path))
+        if returns_path.is_file()
+        else synth_returns_panel(n=300, n_stock=30)
+    )
+    edges_path = root / params["edges_csv"]
+    edges = load_edges(str(edges_path), date_col=params["edge_date_col"]) if edges_path.is_file() else pd.DataFrame()
+
+    hybrid_rows = []
+    default_cluster = "hermitian"
+    for alpha in params["hybrid_alpha_grid"]:
+        for family in params["strategy_families"]:
+            p = dict(params)
+            p["_family"] = family
+            dr, stab, _, _, _ = _accumulate_family_returns(
+                R,
+                edges,
+                p,
+                cluster_method=default_cluster,
+                hybrid_alpha=float(alpha),
+                max_rebalances=params["max_rebalances"],
+                quick=quick,
+                collect_cluster_labels=False,
+            )
+            met = _metrics_from_returns(dr)
+            hybrid_rows.append(
+                {
+                    "alpha": alpha,
+                    "strategy_family": family,
+                    "cluster_method": default_cluster,
+                    "edge_score": params["edge_score"],
+                    **met,
+                    "net_sharpe": met["sharpe"],
+                    "cluster_ari_mean": float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan,
+                    "eigenspace_drift_mean": float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan,
+                }
+            )
+    pd.DataFrame(hybrid_rows).to_csv(out_dir / "hybrid_alpha_sweep.csv", index=False)
+    if hybrid_rows:
+        hdf = pd.DataFrame(hybrid_rows)
+        plt.figure(figsize=(6, 4))
+        for fam in hdf["strategy_family"].unique():
+            sub = hdf[hdf["strategy_family"] == fam]
+            plt.plot(sub["alpha"], sub["sharpe"], "o-", label=fam)
+        plt.xlabel("alpha")
+        plt.ylabel("Sharpe")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir / "plots" / "hybrid_alpha_sweep.png", dpi=150)
+        plt.close()
+    return out_dir / "hybrid_alpha_sweep.csv"
 
 
 def _write_plots(
@@ -708,6 +980,12 @@ def _write_plots(
     all_daily: dict[str, pd.Series],
     comp_tab: pd.DataFrame,
     stability_all: list,
+    *,
+    bt_event_rows: list | None = None,
+    res_last: Any = None,
+    labels_last: pd.Series | None = None,
+    F_last: np.ndarray | None = None,
+    turnover_rows: list | None = None,
 ) -> None:
     plots = out_dir / "plots"
 
@@ -720,6 +998,16 @@ def _write_plots(
         plt.title("Cumulative PnL by strategy family")
         plt.tight_layout()
         plt.savefig(plots / "cumulative_pnl_by_strategy.png", dpi=150)
+        plt.close()
+
+        dd = pd.DataFrame({k: drawdown_series(v) for k, v in all_daily.items()})
+        plt.figure(figsize=(8, 4))
+        for c in dd.columns:
+            plt.plot(dd.index, dd[c], label=c)
+        plt.legend()
+        plt.title("Drawdown by strategy")
+        plt.tight_layout()
+        plt.savefig(plots / "drawdown_by_strategy.png", dpi=150)
         plt.close()
 
     if panel_df is not None and not panel_df.empty:
@@ -787,6 +1075,65 @@ def _write_plots(
             plt.tight_layout()
             plt.savefig(plots / "eigenspace_drift.png", dpi=150)
             plt.close()
+
+    if panel_df is not None and not panel_df.empty:
+        fwd = panel_df[panel_df["direction"].str.contains("forward", na=False)]
+        if not fwd.empty:
+            plt.figure(figsize=(6, 4))
+            for cond in fwd["condition"].dropna().unique()[:6]:
+                sub = fwd[fwd["condition"] == cond]
+                plt.plot(sub["horizon"], sub["beta"], "o-", label=str(cond)[:20])
+            plt.axhline(0, ls="--", c="gray")
+            plt.legend(fontsize=8)
+            plt.xlabel("Horizon")
+            plt.ylabel("Beta")
+            plt.title("Event-conditioned forward beta")
+            plt.tight_layout()
+            plt.savefig(plots / "event_conditioned_beta.png", dpi=150)
+            plt.close()
+
+    if bt_event_rows:
+        edf = pd.DataFrame(bt_event_rows)
+        plt.figure(figsize=(6, 4))
+        plt.bar(edf["condition"].astype(str), edf["sharpe"].fillna(0))
+        plt.xticks(rotation=35, ha="right")
+        plt.title("Sharpe by event condition")
+        plt.tight_layout()
+        plt.savefig(plots / "event_conditioned_sharpe.png", dpi=150)
+        plt.close()
+
+    if turnover_rows:
+        tdf = pd.DataFrame(turnover_rows)
+        if "total_turnover" in tdf.columns:
+            plt.figure(figsize=(6, 4))
+            plt.bar(tdf["strategy_family"], tdf["total_turnover"].fillna(0))
+            plt.xticks(rotation=30, ha="right")
+            plt.title("Turnover by strategy")
+            plt.tight_layout()
+            plt.savefig(plots / "turnover_by_strategy.png", dpi=150)
+            plt.close()
+
+    if res_last is not None and labels_last is not None:
+        C = res_last.C
+        nodes = labels_last.index.astype(str).tolist()
+        order = labels_last.sort_values().index.tolist()
+        M = C.reindex(index=order, columns=order, fill_value=0.0).to_numpy()
+        plt.figure(figsize=(7, 6))
+        plt.imshow(M, aspect="auto", cmap="RdBu_r")
+        plt.colorbar(label="C")
+        plt.title("C sorted by cluster")
+        plt.tight_layout()
+        plt.savefig(plots / "heatmap_C_sorted_by_cluster.png", dpi=150)
+        plt.close()
+
+    if F_last is not None and F_last.size > 0:
+        plt.figure(figsize=(6, 5))
+        plt.imshow(F_last, aspect="auto", cmap="viridis")
+        plt.colorbar(label="meta flow")
+        plt.title("Cluster meta-flow matrix")
+        plt.tight_layout()
+        plt.savefig(plots / "meta_flow_network.png", dpi=150)
+        plt.close()
 
 
 def generate_final_report(out_dir: Path, params: dict[str, Any]) -> None:
