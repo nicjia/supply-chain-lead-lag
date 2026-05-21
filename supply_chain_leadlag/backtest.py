@@ -328,9 +328,13 @@ def apply_risk_overlays(
         if denom > 1e-12:
             lam = float((out * b).sum()) / denom
             out = out - lam * b
-            if max_abs_weight is not None and max_abs_weight > 0:
-                out = out.clip(lower=-max_abs_weight, upper=max_abs_weight)
-    out = _normalize_long_short_weights(out)
+    if max_abs_weight is not None and max_abs_weight > 0:
+        peak = float(out.abs().max())
+        if peak > max_abs_weight and peak > 1e-15:
+            # Scale preserves beta neutrality; clip would break it.
+            out = out * (max_abs_weight / peak)
+        else:
+            out = out.clip(lower=-max_abs_weight, upper=max_abs_weight)
     return out
 
 
