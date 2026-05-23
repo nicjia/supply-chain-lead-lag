@@ -19,6 +19,7 @@ def main():
     ap.add_argument("--config", default=str(_ROOT / "config" / "research.yaml"))
     ap.add_argument("--max-rebalances", type=int, default=None)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
     out = run_hybrid_alpha_sweep(
@@ -26,6 +27,7 @@ def main():
         max_rebalances=args.max_rebalances,
         quick=args.quick,
         repo_root=_ROOT,
+        verbose=args.verbose,
     )
     print(f"Wrote {out}")
 

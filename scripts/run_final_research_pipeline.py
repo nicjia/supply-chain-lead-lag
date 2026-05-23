@@ -18,7 +18,17 @@ def main():
     ap = argparse.ArgumentParser(description="Final supply-chain lead-lag research pipeline")
     ap.add_argument("--config", default=str(_ROOT / "config" / "research.yaml"))
     ap.add_argument("--max-rebalances", type=int, default=None)
-    ap.add_argument("--quick", action="store_true", help="Smoke run (3 rebalances, smaller synthetic if needed)")
+    ap.add_argument(
+        "--quick",
+        action="store_true",
+        help="Smoke run (fewer rebalances, trimmed sweeps, no baseline backtest)",
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="DEBUG logging (includes each rebalance date inside rolling loops)",
+    )
     args = ap.parse_args()
 
     out = run_final_research_pipeline(
@@ -26,6 +36,7 @@ def main():
         max_rebalances=args.max_rebalances,
         quick=args.quick or (args.max_rebalances is not None and args.max_rebalances <= 3),
         repo_root=_ROOT,
+        verbose=args.verbose,
     )
     print(f"Wrote results to {out}")
 

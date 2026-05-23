@@ -52,6 +52,9 @@ python scripts/run_final_research_pipeline.py --config config/research.yaml --ma
 # Faster smoke (fewer rebalances, trimmed sweeps, no baseline backtest)
 python scripts/run_final_research_pipeline.py --quick --max-rebalances 2
 
+# Verbose: step-by-step INFO + per-rebalance DEBUG lines
+python scripts/run_final_research_pipeline.py --config config/research.yaml --max-rebalances 12 -v
+
 # Hybrid α sweep only → hybrid_alpha_sweep.csv + plot
 python scripts/run_hybrid_alpha_sweep.py --config config/research.yaml
 ```

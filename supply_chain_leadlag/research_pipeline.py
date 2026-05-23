@@ -5,9 +5,11 @@ Unified final research pipeline: panel tests, strategy families, clustering, hyb
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from supply_chain_leadlag.backtest import (
     comparison_metrics_table,
@@ -45,6 +49,17 @@ from supply_chain_leadlag.research_outputs import (
 )
 from supply_chain_leadlag.strategy_families import run_strategy_family
 from supply_chain_leadlag.yaml_config import load_yaml_config
+
+
+def configure_pipeline_logging(*, verbose: bool = False, level: str | None = None) -> None:
+    """Console logging for pipeline progress. ``verbose`` enables per-rebalance DEBUG lines."""
+    lvl_name = (level or ("DEBUG" if verbose else "INFO")).upper()
+    logging.basicConfig(
+        level=getattr(logging, lvl_name, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 
 def _git_commit() -> str | None:
@@ -265,8 +280,15 @@ def _accumulate_family_returns(
     max_rebalances: int | None = None,
     quick: bool = False,
     collect_cluster_labels: bool = True,
+    log_prefix: str = "",
 ) -> tuple[pd.Series, list[dict], dict, list[dict], list[tuple[pd.Timestamp, pd.Series]]]:
     """Rolling PIT loop for one (family, cluster_method, alpha)."""
+    tag = log_prefix or (
+        f"family={params.get('_family', '?')} cluster={cluster_method} "
+        f"alpha={hybrid_alpha if hybrid_alpha is not None else 'none'}"
+    )
+    logger.info("Rolling backtest start: %s (max_rebalances=%s)", tag, max_rebalances)
+    t0 = time.perf_counter()
     idx = R.index.sort_values()
     start, end = idx.min(), idx.max()
     rebalances = pd.bdate_range(start, end, freq=params["rebalance_freq"])
@@ -274,6 +296,7 @@ def _accumulate_family_returns(
     rebalances = rebalances[rebalances >= idx[lb]]
     if max_rebalances is not None:
         rebalances = rebalances[: max_rebalances]
+    n_reb_planned = len(rebalances)
 
     sector_map = load_sector_map(params.get("sector_map_csv"))
     daily_acc = pd.Series(0.0, index=idx)
@@ -286,6 +309,13 @@ def _accumulate_family_returns(
 
     for i, T in enumerate(rebalances):
         T = pd.Timestamp(T)
+        logger.debug(
+            "  rebalance %d/%d @ %s (%s)",
+            i + 1,
+            n_reb_planned,
+            T.date(),
+            tag,
+        )
         e_pit = filter_edges_pit(edges, T, expiry_days=params.get("edge_expiry_days"))
         R_win = returns_window(R, T, params["lookback_rows"])
         if R_win.empty or len(e_pit) < 5:
@@ -386,6 +416,13 @@ def _accumulate_family_returns(
             break
 
     meta = {"n_rebalances": n_reb, "cluster_method": cluster_method, "hybrid_alpha": hybrid_alpha}
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "Rolling backtest done: %s — %d rebalance(s) used in %.1fs",
+        tag,
+        n_reb,
+        elapsed,
+    )
     return daily_acc, stability_rows, meta, cluster_label_records, weight_events
 
 
@@ -395,8 +432,11 @@ def run_final_research_pipeline(
     max_rebalances: int | None = None,
     quick: bool = False,
     repo_root: Path | None = None,
+    verbose: bool = False,
 ) -> Path:
     """Execute full pipeline; returns output directory path."""
+    configure_pipeline_logging(verbose=verbose)
+    pipeline_t0 = time.perf_counter()
     root = repo_root or Path(__file__).resolve().parents[1]
     raw_cfg = load_yaml_config(config_path or root / "config" / "research.yaml")
     params = flat_research_params(raw_cfg)
@@ -414,6 +454,21 @@ def run_final_research_pipeline(
         ]
         params["baselines_include"] = False
 
+    logger.info(
+        "Pipeline start config=%s quick=%s max_rebalances=%s output=%s",
+        config_path or root / "config" / "research.yaml",
+        quick,
+        params.get("max_rebalances"),
+        params["output_dir"],
+    )
+    logger.info(
+        "Settings: edge_score=%s families=%s cluster_methods=%s hybrid_alphas=%s",
+        params["edge_score"],
+        params["strategy_families"],
+        params["cluster_methods"],
+        params["hybrid_alpha_grid"],
+    )
+
     out_dir = Path(params["output_dir"])
     if not out_dir.is_absolute():
         out_dir = root / out_dir
@@ -424,6 +479,11 @@ def run_final_research_pipeline(
     (out_dir / "report").mkdir(exist_ok=True)
 
     warnings: list[str] = []
+    step = 0
+    total_steps = 11
+
+    step += 1
+    logger.info("Step %d/%d: load returns and edges", step, total_steps)
     returns_path = root / params["returns_parquet"]
     if returns_path.is_file():
         R = load_returns_wide_by_gvkey(str(returns_path))
@@ -448,10 +508,21 @@ def run_final_research_pipeline(
         ]
         edges = pd.DataFrame(rows)
 
+    logger.info(
+        "Data loaded: %d trading days, %d assets, %d edge rows (%s → %s)",
+        len(R),
+        R.shape[1],
+        len(edges),
+        R.index.min().date(),
+        R.index.max().date(),
+    )
+
     # Save config
     with open(out_dir / "config_used.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(raw_cfg or params, f, sort_keys=False)
 
+    step += 1
+    logger.info("Step %d/%d: panel forward / reverse validation", step, total_steps)
     # Panel
     panel_df = run_panel_with_parquet(root, horizon_max=params["panel_horizon_max"])
     if panel_df is None or panel_df.empty:
@@ -469,7 +540,10 @@ def run_final_research_pipeline(
     if not horizon_df.empty:
         horizon_df["economic_magnitude_bps"] = horizon_df["beta"] * 1e4
     horizon_df.to_csv(out_dir / "horizon_decay.csv", index=False)
+    logger.info("Panel rows written: %d", len(panel_df))
 
+    step += 1
+    logger.info("Step %d/%d: supplier-pressure baselines (rolling comparison)", step, total_steps)
     # Baselines via existing runner (skipped in quick mode for speed)
     if params["baselines_include"] and not quick:
         comp = run_rolling_comparison(
@@ -485,8 +559,10 @@ def run_final_research_pipeline(
             commission_bps=params["commission_bps"],
             slippage_bps=params["slippage_bps"],
             borrow_bps_annual=params["borrow_bps_annual"],
+            show_progress=verbose,
         )
         comp_tab = comparison_metrics_table(comp)
+        logger.info("Baselines complete (main + random + momentum + structural + equal_weight)")
     else:
         from supply_chain_leadlag.backtest import BacktestResult, ComparisonResult
 
@@ -508,7 +584,12 @@ def run_final_research_pipeline(
         comp_tab = pd.DataFrame()
         if quick:
             warnings.append("quick mode: baselines skipped")
+            logger.info("Baselines skipped (quick mode)")
+        else:
+            logger.info("Baselines skipped (baselines.include=false in config)")
 
+    step += 1
+    logger.info("Step %d/%d: strategy family comparison (%d families)", step, total_steps, len(params["strategy_families"]))
     # Strategy families
     family_rows = []
     all_daily: dict[str, pd.Series] = {}
@@ -521,7 +602,13 @@ def run_final_research_pipeline(
     labels_last: pd.Series | None = None
     F_last: np.ndarray | None = None
 
-    for family in params["strategy_families"]:
+    for fi, family in enumerate(params["strategy_families"], start=1):
+        logger.info(
+            "  family %d/%d: %s",
+            fi,
+            len(params["strategy_families"]),
+            family,
+        )
         p = dict(params)
         p["_family"] = family
         dr, stab, _, clab, wevents = _accumulate_family_returns(
@@ -569,10 +656,19 @@ def run_final_research_pipeline(
             "signed",
             "hybrid_prior",
         ]))
-    for cm in cm_list:
+    step += 1
+    logger.info(
+        "Step %d/%d: cluster method comparison (%d methods × up to %d families)",
+        step,
+        total_steps,
+        len(cm_list),
+        1 if quick else 3,
+    )
+    for cmi, cm in enumerate(cm_list, start=1):
         fam_list = ("supplier_pressure",) if quick else ("supplier_pressure", "metacluster", "clusterrank")
         for family in fam_list:
             if family == "supplier_pressure" or family in params["strategy_families"]:
+                logger.info("  cluster %d/%d: %s × %s", cmi, len(cm_list), cm, family)
                 p = dict(params)
                 p["_family"] = family
                 try:
@@ -596,6 +692,7 @@ def run_final_research_pipeline(
                         }
                     )
                     warnings.append(f"skipped {cm} for {family}")
+                    logger.warning("  skipped %s × %s (clustering unavailable)", cm, family)
                     continue
                 met = _metrics_from_returns(dr)
                 ari_mean = float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan
@@ -620,11 +717,22 @@ def run_final_research_pipeline(
                 stability_all.extend(stab)
     pd.DataFrame(cluster_rows).to_csv(out_dir / "cluster_method_comparison.csv", index=False)
 
+    step += 1
+    hybrid_families = ["supplier_pressure"] if quick else params["strategy_families"]
+    n_hybrid = len(params["hybrid_alpha_grid"]) * len(hybrid_families)
+    logger.info(
+        "Step %d/%d: hybrid alpha sweep (%d alphas × %d families = %d runs)",
+        step,
+        total_steps,
+        len(params["hybrid_alpha_grid"]),
+        len(hybrid_families),
+        n_hybrid,
+    )
     # Hybrid alpha sweep
     hybrid_rows = []
-    hybrid_families = ["supplier_pressure"] if quick else params["strategy_families"]
-    for alpha in params["hybrid_alpha_grid"]:
+    for ai, alpha in enumerate(params["hybrid_alpha_grid"], start=1):
         for family in hybrid_families:
+            logger.info("  hybrid %d/%d: alpha=%.2f × %s", ai, len(params["hybrid_alpha_grid"]), float(alpha), family)
             p = dict(params)
             p["_family"] = family
             dr, stab, _, _, _ = _accumulate_family_returns(
@@ -658,6 +766,8 @@ def run_final_research_pipeline(
             )
     pd.DataFrame(hybrid_rows).to_csv(out_dir / "hybrid_alpha_sweep.csv", index=False)
 
+    step += 1
+    logger.info("Step %d/%d: summary metrics and turnover tables", step, total_steps)
     # Summary metrics
     summary_rows = []
     for _, row in pd.DataFrame(family_rows).iterrows():
@@ -707,6 +817,8 @@ def run_final_research_pipeline(
     # Stability
     pd.DataFrame(stability_all).to_csv(out_dir / "cluster_stability.csv", index=False)
 
+    step += 1
+    logger.info("Step %d/%d: event-conditioned analysis", step, total_steps)
     # Events
     earnings = load_earnings_calendar(root / params["earnings_calendar_csv"])
     event_cfg = {
@@ -777,6 +889,8 @@ def run_final_research_pipeline(
         )
     pd.DataFrame(turnover_rows).to_csv(out_dir / "turnover_costs.csv", index=False)
 
+    step += 1
+    logger.info("Step %d/%d: matrix / cluster / holdings artifacts", step, total_steps)
     # Cluster label artifacts
     lab_df, size_df = cluster_labels_to_frames(all_cluster_labels)
     if not lab_df.empty:
@@ -874,6 +988,8 @@ def run_final_research_pipeline(
     with open(out_dir / "run_metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
+    step += 1
+    logger.info("Step %d/%d: plots", step, total_steps)
     _write_plots(
         out_dir,
         panel_df,
@@ -889,7 +1005,16 @@ def run_final_research_pipeline(
         F_last=F_last,
         turnover_rows=turnover_rows,
     )
+    step += 1
+    logger.info("Step %d/%d: final report (markdown + LaTeX)", step, total_steps)
     generate_final_report(out_dir, params)
+
+    elapsed_total = time.perf_counter() - pipeline_t0
+    logger.info("Pipeline complete in %.1fs → %s", elapsed_total, out_dir)
+    if warnings:
+        logger.warning("%d warning(s) recorded in run_metadata.json", len(warnings))
+        for w in warnings:
+            logger.warning("  %s", w)
 
     return out_dir
 
@@ -900,8 +1025,11 @@ def run_hybrid_alpha_sweep(
     max_rebalances: int | None = None,
     quick: bool = False,
     repo_root: Path | None = None,
+    verbose: bool = False,
 ) -> Path:
     """Run only hybrid alpha sweep + plot (writes hybrid_alpha_sweep.csv)."""
+    configure_pipeline_logging(verbose=verbose)
+    logger.info("Hybrid alpha sweep start (config=%s)", config_path)
     root = repo_root or Path(__file__).resolve().parents[1]
     raw_cfg = load_yaml_config(config_path or root / "config" / "research.yaml")
     params = flat_research_params(raw_cfg)
