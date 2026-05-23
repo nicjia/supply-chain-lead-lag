@@ -52,3 +52,49 @@ def test_weights_sum_zero_long_short():
     out = run_strategy_family("globalrank", C, R_win, R_fwd, edges, res=res, q=0.25)
     for _, w in out["events"]:
         assert abs(float(w.sum())) < 1e-6 or w.abs().sum() == 0
+
+
+def test_clusterrank_longs_laggers_not_leaders():
+    from supply_chain_leadlag.clusterrank_strategy import clusterrank_daily_weights, local_leadingness
+
+    nodes = [f"{i:03d}" for i in range(8)]
+    C = pd.DataFrame(0.0, index=nodes, columns=nodes)
+    for i in range(7):
+        C.iloc[i, i + 1] = 1.0
+    labels = pd.Series({n: 0 for n in nodes})
+    dates = pd.date_range("2020-01-01", periods=5, freq="B")
+  # leaders (high ell) move up on day 0
+    R = pd.DataFrame(0.0, index=dates, columns=nodes)
+    ell = local_leadingness(C.loc[nodes, nodes])
+    leaders = ell.nlargest(2).index
+    laggers = ell.nsmallest(2).index
+    R.loc[dates[0], leaders] = 0.02
+    w_df, _ = clusterrank_daily_weights(C, R, labels, q=0.25)
+    w0 = w_df.loc[dates[0]]
+    assert w0.reindex(laggers).sum() > 0
+    assert w0.reindex(leaders).sum() < 0
+
+
+def test_metacluster_clusterrank_use_unit_weight_scale():
+    from supply_chain_leadlag.metacluster_strategy import metacluster_daily_weights
+
+    nodes = [f"{i:03d}" for i in range(12)]
+    C = pd.DataFrame(0.0, index=nodes, columns=nodes)
+    for i in range(11):
+        C.iloc[i, i + 1] = 0.8
+    labels = pd.Series({n: i // 4 for i, n in enumerate(nodes)})
+    dates = pd.date_range("2020-01-01", periods=10, freq="B")
+    rng = np.random.default_rng(1)
+    R = pd.DataFrame({n: rng.standard_normal(10) * 0.01 for n in nodes}, index=dates)
+    w_m, _, _ = metacluster_daily_weights(C, R, labels, q=0.25)
+    out = run_strategy_family(
+        "clusterrank",
+        C,
+        R.iloc[:5],
+        R.iloc[5:],
+        pd.DataFrame(),
+        cluster_labels=labels,
+        q=0.25,
+    )
+    assert w_m.abs().sum(axis=1).max() >= 0.1
+    assert out["daily_returns"].abs().max() > 1e-8

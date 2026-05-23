@@ -45,29 +45,65 @@ Unified run: strategy families, clustering comparison, hybrid α sweep, events, 
 
 Config: [`config/research.yaml`](config/research.yaml). CLI overrides YAML.
 
-```bash
-# Full deliverables (slow; use real returns parquet when available)
-python scripts/run_final_research_pipeline.py --config config/research.yaml --max-rebalances 12
+**After every run, open [`results/final_research/START_HERE.md`](results/final_research/START_HERE.md)** — short guide to the 3 tables and 2 plots that matter most.
 
-# Faster smoke (fewer rebalances, trimmed sweeps, no baseline backtest)
-python scripts/run_final_research_pipeline.py --quick --max-rebalances 2
-
-# Verbose: step-by-step INFO + per-rebalance DEBUG lines
-python scripts/run_final_research_pipeline.py --config config/research.yaml --max-rebalances 12 -v
-
-# Hybrid α sweep only → hybrid_alpha_sweep.csv + plot
-python scripts/run_hybrid_alpha_sweep.py --config config/research.yaml
-```
-
-Regenerate reports from existing results:
+### Full run
 
 ```bash
-python scripts/make_final_report.py --results-dir results/final_research
+# All 11 steps (slow; use real returns parquet)
+uv run --extra dev python scripts/run_final_research_pipeline.py --max-rebalances 12
+
+# Smoke
+uv run --extra dev python scripts/run_final_research_pipeline.py --quick --max-rebalances 2
 ```
 
-**Strategy families:** `supplier_pressure`, `globalrank`, `metacluster`, `clusterrank`  
-**Clustering methods:** `sector`, `supply_community`, `symmetric_spectral`, `hermitian`, `signed`, `hybrid_prior`  
-**Hybrid matrix:** \(C_{\text{hybrid}} = \alpha C_{\text{data}} + (1-\alpha) C_{\text{supply}}\) for \(\alpha \in \{0, 0.25, 0.5, 0.75, 1\}\) on full runs.
+### Selective runs (skip steps you already have)
+
+```bash
+# Your next run: load data + 4-family comparison only (no panel, baselines, sweeps)
+uv run --extra dev python scripts/run_final_research_pipeline.py \
+  --only families \
+  --max-rebalances 12
+
+# Same thing, explicit steps
+uv run --extra dev python scripts/run_final_research_pipeline.py \
+  --steps load,families,summary,plots,report \
+  --skip-steps panel,baselines,cluster_sweep,hybrid_sweep,events,artifacts
+
+# Full run but skip forward/reverse panel (keep existing panel_forward_reverse.csv)
+uv run --extra dev python scripts/run_final_research_pipeline.py \
+  --skip-steps panel \
+  --max-rebalances 12
+
+# Regenerate plots + START_HERE from existing CSVs (no backtest)
+uv run --extra dev python scripts/run_final_research_pipeline.py --steps plots,report
+
+# Hybrid α sweep only
+uv run --extra dev python scripts/run_hybrid_alpha_sweep.py --config config/research.yaml
+```
+
+**Step names:** `load`, `panel`, `baselines`, `families`, `cluster_sweep`, `hybrid_sweep`, `summary`, `events`, `artifacts`, `plots`, `report`
+
+**Plot profiles:** `--plot-profile minimal` (default with `--only families`) writes a 2-panel dashboard + cumulative PnL; `full` writes all diagnostic charts.
+
+Regenerate reports from disk:
+
+```bash
+uv run --extra dev python scripts/make_final_report.py --results-dir results/final_research
+```
+
+### What Step 4 uses (initial 4-family comparison)
+
+| Family | Clustering? | Method |
+|--------|-------------|--------|
+| `supplier_pressure` | No | Daily \(s_d = C^\top r_d\) on suppliers |
+| `globalrank` | No | **`spectral`** GlobalRank (config: `strategies.globalrank_method`) |
+| `metacluster` | Yes | **`hermitian`** (config: `clustering.default_cluster_method`, 10 clusters) |
+| `clusterrank` | Yes | Same as metacluster |
+
+All four share the same return-based \(C_{\text{data}}\) at each rebalance (no hybrid α in Step 4). Step 5 varies clustering for metacluster/clusterrank only; Step 6 blends \(C_{\text{data}}\) and \(C_{\text{supply}}\).
+
+**Strategy families:** `supplier_pressure`, `globalrank`, `metacluster`, `clusterrank`
 
 **PIT rules:** edges with `date ≤` rebalance; \(C\) from trailing returns only; supplier-pressure uses \(s_d = C^\top r_d\), weights on \(d+1\); **customers signal, suppliers are traded**.
 

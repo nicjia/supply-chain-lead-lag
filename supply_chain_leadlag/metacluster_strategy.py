@@ -99,10 +99,11 @@ def metacluster_daily_weights(
             k = max(1, int(len(order) * q))
             long_lag = order.head(k).index
             short_lag = order.tail(k).index
+            sign = float(np.sign(sig))
             for ix in long_lag:
-                w.loc[ix] += sig / k
+                w.loc[ix] += sign / k
             for ix in short_lag:
-                w.loc[ix] -= sig / k
+                w.loc[ix] -= sign / k
             for ix in members_b:
                 sc.loc[ix] = sig * float(flow)
             n_active += 1

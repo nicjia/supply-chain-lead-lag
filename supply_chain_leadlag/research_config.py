@@ -44,6 +44,7 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "signed",
         "hybrid_prior",
     ])
+    pipeline = cfg.get("pipeline", {})
     if isinstance(cl_methods, str):
         cl_methods = [x.strip() for x in cl_methods.split(",") if x.strip()]
 
@@ -76,7 +77,10 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "n_clusters": int(cl.get("n_clusters", 10)),
         "cluster_random_state": int(cl.get("random_state", 42)),
         "cluster_methods": list(cl_methods),
+        "default_cluster_method": cl.get("default_cluster_method", "hermitian"),
         "hybrid_prior_alpha": float(cl.get("hybrid_prior_alpha", 0.5)),
+        "pipeline_steps": pipeline.get("steps"),
+        "plot_profile": report.get("plot_profile", "full"),
         "strategy_families": list(families),
         "q": float(strat.get("q", 0.2)),
         "rebalance_freq": str(strat.get("rebalance_freq", "BME")),

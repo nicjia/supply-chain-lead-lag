@@ -31,6 +31,7 @@ matrix:
 clustering:
   n_clusters: 10
   random_state: 42
+  default_cluster_method: hermitian
   methods:
   - sector
   - supply_community
@@ -80,6 +81,7 @@ report:
   generate_md: true
   generate_tex: true
   generate_pdf: false
+  plot_profile: full
 panel:
   horizon_max: 5
   build_if_missing: true
