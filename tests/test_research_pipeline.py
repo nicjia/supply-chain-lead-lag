@@ -64,7 +64,7 @@ def test_quick_pipeline_writes_outputs(tmp_path):
         "drawdowns.csv",
         "report/final_report.md",
         "report/final_report.tex",
-        "plots/cumulative_pnl_by_strategy.png",
+        "plots/strategy_families_dashboard.png",
         "plots/hybrid_alpha_sweep.png",
     ]
     for name in required:

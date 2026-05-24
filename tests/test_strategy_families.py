@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from supply_chain_leadlag.matrix import build_lead_lag_matrix_gvkey
+from supply_chain_leadlag.matrix import build_lead_lag_matrix_gvkey, hybrid_matrix, structural_C_from_edges
 from supply_chain_leadlag.strategy_families import run_strategy_family
 
 
@@ -52,6 +52,32 @@ def test_weights_sum_zero_long_short():
     out = run_strategy_family("globalrank", C, R_win, R_fwd, edges, res=res, q=0.25)
     for _, w in out["events"]:
         assert abs(float(w.sum())) < 1e-6 or w.abs().sum() == 0
+
+
+def test_globalrank_respects_preblended_C():
+    """Hybrid sweep pre-blends C; globalrank spectral scores must use C_use, not res.C."""
+    from supply_chain_leadlag.backtest import scores_from_result
+    from supply_chain_leadlag.matrix import LeadLagResult, leadlag_result_replace_C
+
+    nodes = [f"n{i}" for i in range(6)]
+    C_data = pd.DataFrame(0.0, index=nodes, columns=nodes)
+    for i in range(5):
+        C_data.iloc[i, i + 1] = 1.0
+    C_sup = pd.DataFrame(0.0, index=nodes, columns=nodes)
+    for i in range(1, 6):
+        C_sup.iloc[i, 0] = 1.0
+    S = C_data - C_data.T
+    res = LeadLagResult(
+        edge_scores=pd.DataFrame(),
+        C=C_data,
+        S=S,
+        leadingness=S.sum(axis=1),
+    )
+    C0 = hybrid_matrix(C_data, C_sup, 0.0)
+    C1 = hybrid_matrix(C_data, C_sup, 1.0)
+    sc0 = scores_from_result(leadlag_result_replace_C(res, C0), method="spectral")
+    sc1 = scores_from_result(leadlag_result_replace_C(res, C1), method="spectral")
+    assert not sc0.round(6).equals(sc1.round(6))
 
 
 def test_clusterrank_longs_laggers_not_leaders():

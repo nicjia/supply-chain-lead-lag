@@ -80,9 +80,30 @@ uv run --extra dev python scripts/run_final_research_pipeline.py --steps plots,r
 
 # Hybrid α sweep only
 uv run --extra dev python scripts/run_hybrid_alpha_sweep.py --config config/research.yaml
+
+# Panel regressions + refresh report (comma-separated — not space-separated)
+uv run --extra dev python scripts/run_final_research_pipeline.py --steps load,panel,report
 ```
 
-**Step names:** `load`, `panel`, `baselines`, `families`, `cluster_sweep`, `hybrid_sweep`, `summary`, `events`, `artifacts`, `plots`, `report`
+### Valid pipeline step names
+
+Pass to `--steps` or `--skip-steps` as a **comma-separated** list (e.g. `load,panel,report`, not `load panel report`):
+
+| Step | Role |
+|------|------|
+| `load` | Load returns + edges; write `config_used.yaml` (required for any backtest step) |
+| `panel` | Forward/reverse predictability → `panel_forward_reverse.csv` |
+| `baselines` | Rolling supplier-pressure vs momentum/random baselines |
+| `families` | Four strategy families → `strategy_family_comparison.csv`, `daily_returns.csv` |
+| `cluster_sweep` | Cluster methods × meta/clusterrank → `cluster_method_comparison.csv` |
+| `hybrid_sweep` | α grid → `hybrid_alpha_sweep.csv` |
+| `summary` | `summary_metrics.csv`, turnover tables |
+| `events` | Event-conditioned panel/backtest (needs earnings calendar) |
+| `artifacts` | Last-rebalance matrices, cluster labels |
+| `plots` | PNGs under `results/final_research/plots/` |
+| `report` | `report/final_report.md`, `START_HERE.md` |
+
+**Presets:** `--only families` → `load,families,summary,plots,report` · `--only hybrid` → `load,hybrid_sweep,plots,report`
 
 **Plot profiles:** `--plot-profile minimal` (default with `--only families`) writes a 2-panel dashboard + cumulative PnL; `full` writes all diagnostic charts.
 

@@ -12,7 +12,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from supply_chain_leadlag.research_config import load_research_config
-from supply_chain_leadlag.research_pipeline import generate_final_report
+from supply_chain_leadlag.research_pipeline import _write_methods_comparison_plots, generate_final_report
 
 
 def main():
@@ -24,8 +24,11 @@ def main():
     if not out_dir.is_absolute():
         out_dir = _ROOT / out_dir
     params = load_research_config(args.config)
+    _write_methods_comparison_plots(out_dir)
     generate_final_report(out_dir, params)
-    print(f"Report written under {out_dir / 'report'}")
+    print(f"Deliverable: {out_dir / 'report' / 'final_report.md'}")
+    print(f"Comparison:   {out_dir / 'plots' / 'methods_comparison.png'}")
+    print(f"Quick index:  {out_dir / 'START_HERE.md'}")
 
 
 if __name__ == "__main__":

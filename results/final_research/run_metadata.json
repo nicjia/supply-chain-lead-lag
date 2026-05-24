@@ -1,6 +1,6 @@
 {
-  "run_timestamp": "2026-05-23 11:13:24",
-  "git_commit": "7e8ab9a3416d8c44c30a2c310cbd568e876db993",
+  "run_timestamp": "2026-05-24 10:40:45",
+  "git_commit": "ce8bf0d42bf3f906272b430716f73cfa866c300b",
   "python_version": "3.11.12 (main, May 22 2025, 01:39:08) [Clang 20.1.4 ]",
   "data_start": "2010-01-04",
   "data_end": "2024-12-31",
@@ -8,16 +8,14 @@
   "n_edge_rows": 17153,
   "n_unique_customers": 1198,
   "n_unique_suppliers": 1857,
-  "n_rebalances": 12,
+  "n_rebalances": null,
   "pit_edge_date_col": "filing_date",
   "pipeline_steps": [
-    "cluster_sweep",
     "load",
-    "plots",
-    "report"
+    "panel"
   ],
   "plot_profile": "full",
-  "default_cluster_method": "hermitian",
+  "default_cluster_method": "signed",
   "warnings": [],
   "quick": false
 }

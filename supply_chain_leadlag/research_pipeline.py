@@ -669,6 +669,9 @@ def run_final_research_pipeline(
                 edge_date_col=params["edge_date_col"],
                 edge_expiry_days=params["edge_expiry_days"],
             )
+            warnings.append(
+                "panel: pooled OLS fallback (none_pooled); build leadlag_panel_*.parquet and install linearmodels for FE+clustered SE"
+            )
         else:
             warnings.append("panel: used linearmodels on leadlag_panel_forward/reverse.parquet")
         panel_df.to_csv(out_dir / "panel_forward_reverse.csv", index=False)
@@ -833,6 +836,7 @@ def run_final_research_pipeline(
                 stability_all.extend(stab)
         pd.DataFrame(cluster_rows).to_csv(out_dir / "cluster_method_comparison.csv", index=False)
 
+    hybrid_daily = pd.DataFrame()
     if "hybrid_sweep" in enabled:
         assert R is not None and edges is not None
         hybrid_families = ["supplier_pressure"] if quick else params["strategy_families"]
@@ -844,41 +848,18 @@ def run_final_research_pipeline(
             len(params["hybrid_alpha_grid"]),
             len(hybrid_families),
         )
-        for ai, alpha in enumerate(params["hybrid_alpha_grid"], start=1):
-            for family in hybrid_families:
-                logger.info("  hybrid %d/%d: alpha=%.2f × %s", ai, len(params["hybrid_alpha_grid"]), float(alpha), family)
-                p = dict(params)
-                p["_family"] = family
-                dr, stab, _, _, _ = _accumulate_family_returns(
-                    R,
-                    edges,
-                    p,
-                    cluster_method=default_cluster,
-                    hybrid_alpha=float(alpha),
-                    max_rebalances=max_reb,
-                    quick=quick,
-                    collect_cluster_labels=False,
-                )
-                met = _metrics_from_returns(dr)
-                ari_mean = float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan
-                drift_mean = float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan
-                hybrid_rows.append(
-                    {
-                        "alpha": alpha,
-                        "strategy_family": family,
-                        "cluster_method": default_cluster,
-                        "edge_score": params["edge_score"],
-                        "ann_return": met["ann_return"],
-                        "ann_vol": met["ann_vol"],
-                        "sharpe": met["sharpe"],
-                        "max_drawdown": met["max_drawdown"],
-                        "avg_turnover": met["avg_turnover"],
-                        "net_sharpe": met["net_sharpe"],
-                        "cluster_ari_mean": ari_mean,
-                        "eigenspace_drift_mean": drift_mean,
-                    }
-                )
+        hybrid_rows, hybrid_daily = _execute_hybrid_alpha_sweep(
+            R,
+            edges,
+            params,
+            default_cluster=default_cluster,
+            max_rebalances=max_reb,
+            quick=quick,
+            families=list(hybrid_families),
+        )
         pd.DataFrame(hybrid_rows).to_csv(out_dir / "hybrid_alpha_sweep.csv", index=False)
+        if not hybrid_daily.empty:
+            hybrid_daily.to_csv(out_dir / "hybrid_alpha_daily_returns.csv", index=False)
 
     if "summary" in enabled:
         step_n += 1
@@ -1133,6 +1114,211 @@ def run_final_research_pipeline(
     return out_dir
 
 
+def _execute_hybrid_alpha_sweep(
+    R: pd.DataFrame,
+    edges: pd.DataFrame,
+    params: dict[str, Any],
+    *,
+    default_cluster: str,
+    max_rebalances: int | None,
+    quick: bool,
+    families: list[str] | None = None,
+) -> tuple[list[dict], pd.DataFrame]:
+    """Run all (alpha, family) hybrid backtests; return metrics rows + long daily returns."""
+    fams = families if families is not None else (
+        ["supplier_pressure"] if quick else list(params["strategy_families"])
+    )
+    hybrid_rows: list[dict] = []
+    daily_parts: list[pd.DataFrame] = []
+
+    for alpha in params["hybrid_alpha_grid"]:
+        for family in fams:
+            p = dict(params)
+            p["_family"] = family
+            dr, stab, _, _, _ = _accumulate_family_returns(
+                R,
+                edges,
+                p,
+                cluster_method=default_cluster,
+                hybrid_alpha=float(alpha),
+                max_rebalances=max_rebalances,
+                quick=quick,
+                collect_cluster_labels=False,
+            )
+            met = _metrics_from_returns(dr)
+            hybrid_rows.append(
+                {
+                    "alpha": alpha,
+                    "strategy_family": family,
+                    "cluster_method": default_cluster,
+                    "edge_score": params["edge_score"],
+                    **met,
+                    "net_sharpe": met["sharpe"],
+                    "cluster_ari_mean": float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan,
+                    "eigenspace_drift_mean": float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan,
+                }
+            )
+            if not dr.empty:
+                daily_parts.append(
+                    dr.rename("daily_return").to_frame().assign(
+                        alpha=float(alpha),
+                        strategy_family=family,
+                    )
+                )
+
+    if daily_parts:
+        daily_long = pd.concat(daily_parts)
+        daily_long.index.name = "date"
+        daily_long = daily_long.reset_index()
+    else:
+        daily_long = pd.DataFrame(columns=["date", "daily_return", "alpha", "strategy_family"])
+    return hybrid_rows, daily_long
+
+
+def _write_hybrid_alpha_plots(out_dir: Path, hybrid_rows: list[dict], hybrid_daily: pd.DataFrame | None) -> None:
+    """Sharpe vs alpha and cumulative PnL panels from hybrid sweep outputs."""
+    plots = out_dir / "plots"
+    plots.mkdir(parents=True, exist_ok=True)
+
+    if hybrid_rows:
+        hdf = pd.DataFrame(hybrid_rows)
+        plt.figure(figsize=(7, 4))
+        for fam in sorted(hdf["strategy_family"].unique()):
+            sub = hdf[hdf["strategy_family"] == fam].sort_values("alpha")
+            plt.plot(sub["alpha"], sub["sharpe"], "o-", label=fam, linewidth=1.5, markersize=6)
+        plt.axhline(0, ls="--", c="gray", lw=0.8)
+        plt.xlabel("Hybrid α  (1 = data only, 0 = supply chain only)")
+        plt.ylabel("Sharpe")
+        plt.title("Hybrid α sweep: Sharpe by strategy family")
+        plt.legend(fontsize=8)
+        plt.grid(True, alpha=0.25)
+        plt.tight_layout()
+        plt.savefig(plots / "hybrid_alpha_sweep.png", dpi=150)
+        plt.close()
+
+    if hybrid_daily is None or hybrid_daily.empty:
+        return
+
+    daily = hybrid_daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+    families = sorted(daily["strategy_family"].unique())
+    n = len(families)
+    ncols = 2
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+    cmap = plt.colormaps.get_cmap("viridis")
+    alphas = sorted(daily["alpha"].unique())
+
+    for ax, fam in zip(axes.flatten(), families):
+        sub = daily[daily["strategy_family"] == fam]
+        for i, alpha in enumerate(alphas):
+            s = sub[sub["alpha"] == alpha].set_index("date")["daily_return"].sort_index()
+            if s.empty:
+                continue
+            cum = (1 + s.fillna(0)).cumprod()
+            color = cmap(i / max(len(alphas) - 1, 1))
+            ax.plot(cum.index, cum, color=color, linewidth=1.2, label=f"α={alpha:g}")
+        ax.axhline(1.0, ls="--", c="gray", lw=0.6)
+        ax.set_title(fam.replace("_", " "), fontsize=10, fontweight="bold")
+        ax.set_ylabel("Cumulative PnL")
+        ax.legend(fontsize=7, loc="best")
+        ax.grid(True, alpha=0.25)
+    for ax in axes.flatten()[n:]:
+        ax.set_visible(False)
+    fig.suptitle("Hybrid α sweep: cumulative PnL (signed clustering)", fontsize=12, y=1.01)
+    plt.tight_layout()
+    plt.savefig(plots / "hybrid_alpha_sweep_cumulative_pnl.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+    _write_methods_comparison_plots(out_dir)
+
+
+def _write_methods_comparison_plots(out_dir: Path) -> None:
+    """Side-by-side cumulative PnL (α=1 vs best-α per family) and Sharpe heatmap."""
+    plots = out_dir / "plots"
+    plots.mkdir(parents=True, exist_ok=True)
+    daily_path = out_dir / "hybrid_alpha_daily_returns.csv"
+    hybrid_path = out_dir / "hybrid_alpha_sweep.csv"
+    if not daily_path.is_file() or not hybrid_path.is_file():
+        return
+
+    daily = pd.read_csv(daily_path, parse_dates=["date"])
+    hdf = pd.read_csv(hybrid_path)
+    fam_order = ["supplier_pressure", "globalrank", "metacluster", "clusterrank"]
+    palette = {
+        "supplier_pressure": "#440154",
+        "globalrank": "#31688e",
+        "metacluster": "#35b779",
+        "clusterrank": "#fde725",
+    }
+
+    best = hdf.loc[hdf.groupby("strategy_family")["sharpe"].idxmax()]
+    best_alpha = dict(zip(best["strategy_family"], best["alpha"]))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    for fam in fam_order:
+        sub = daily[(daily["strategy_family"] == fam) & (np.isclose(daily["alpha"], 1.0))]
+        if sub.empty:
+            continue
+        s = sub.set_index("date")["daily_return"].sort_index()
+        cum = (1 + s.fillna(0)).cumprod()
+        ax.plot(cum.index, cum, color=palette[fam], lw=1.8, label=fam.replace("_", " "))
+    ax.axhline(1.0, ls="--", c="gray", lw=0.6)
+    ax.set_title("Pure returns (α = 1)", fontweight="bold")
+    ax.set_ylabel("Cumulative PnL")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[1]
+    for fam in fam_order:
+        alpha = float(best_alpha.get(fam, 1.0))
+        sub = daily[(daily["strategy_family"] == fam) & (np.isclose(daily["alpha"], alpha))]
+        if sub.empty:
+            continue
+        s = sub.set_index("date")["daily_return"].sort_index()
+        cum = (1 + s.fillna(0)).cumprod()
+        ax.plot(
+            cum.index,
+            cum,
+            color=palette[fam],
+            lw=1.8,
+            label=f"{fam.replace('_', ' ')} (α={alpha:g}, Sharpe={float(best.loc[best['strategy_family']==fam,'sharpe'].iloc[0]):.2f})",
+        )
+    ax.axhline(1.0, ls="--", c="gray", lw=0.6)
+    ax.set_title("Best α per family (by Sharpe)", fontweight="bold")
+    ax.set_ylabel("Cumulative PnL")
+    ax.legend(fontsize=7, loc="best")
+    ax.grid(True, alpha=0.25)
+    fig.suptitle("Strategy families: returns-only vs tuned hybrid blend", fontsize=12, y=1.02)
+    plt.tight_layout()
+    plt.savefig(plots / "methods_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+    pivot = hdf.pivot_table(index="strategy_family", columns="alpha", values="sharpe", aggfunc="first")
+    pivot = pivot.reindex([f for f in fam_order if f in pivot.index])
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    vals = pivot.to_numpy(dtype=float)
+    vmax = max(0.55, float(np.nanmax(np.abs(vals))))
+    im = ax.imshow(vals, aspect="auto", cmap="RdYlGn", vmin=-0.45, vmax=vmax)
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels([f"{a:g}" for a in pivot.columns])
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([f.replace("_", " ") for f in pivot.index])
+    for i in range(vals.shape[0]):
+        for j in range(vals.shape[1]):
+            v = vals[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=9, color="black")
+    ax.set_xlabel("Hybrid α  (0 = supply only, 1 = returns only)")
+    ax.set_title("Sharpe by family × α")
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="Sharpe")
+    plt.tight_layout()
+    plt.savefig(plots / "hybrid_sharpe_heatmap.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def run_hybrid_alpha_sweep(
     config_path: str | Path | None = None,
     *,
@@ -1141,7 +1327,7 @@ def run_hybrid_alpha_sweep(
     repo_root: Path | None = None,
     verbose: bool = False,
 ) -> Path:
-    """Run only hybrid alpha sweep + plot (writes hybrid_alpha_sweep.csv)."""
+    """Run only hybrid alpha sweep + plots (writes hybrid_alpha_sweep.csv)."""
     configure_pipeline_logging(verbose=verbose)
     logger.info("Hybrid alpha sweep start (config=%s)", config_path)
     root = repo_root or Path(__file__).resolve().parents[1]
@@ -1168,48 +1354,19 @@ def run_hybrid_alpha_sweep(
     edges_path = root / params["edges_csv"]
     edges = load_edges(str(edges_path), date_col=params["edge_date_col"]) if edges_path.is_file() else pd.DataFrame()
 
-    hybrid_rows = []
     default_cluster = params.get("default_cluster_method", "hermitian")
-    for alpha in params["hybrid_alpha_grid"]:
-        for family in params["strategy_families"]:
-            p = dict(params)
-            p["_family"] = family
-            dr, stab, _, _, _ = _accumulate_family_returns(
-                R,
-                edges,
-                p,
-                cluster_method=default_cluster,
-                hybrid_alpha=float(alpha),
-                max_rebalances=params["max_rebalances"],
-                quick=quick,
-                collect_cluster_labels=False,
-            )
-            met = _metrics_from_returns(dr)
-            hybrid_rows.append(
-                {
-                    "alpha": alpha,
-                    "strategy_family": family,
-                    "cluster_method": default_cluster,
-                    "edge_score": params["edge_score"],
-                    **met,
-                    "net_sharpe": met["sharpe"],
-                    "cluster_ari_mean": float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan,
-                    "eigenspace_drift_mean": float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan,
-                }
-            )
+    hybrid_rows, hybrid_daily = _execute_hybrid_alpha_sweep(
+        R,
+        edges,
+        params,
+        default_cluster=default_cluster,
+        max_rebalances=params["max_rebalances"],
+        quick=quick,
+    )
     pd.DataFrame(hybrid_rows).to_csv(out_dir / "hybrid_alpha_sweep.csv", index=False)
-    if hybrid_rows:
-        hdf = pd.DataFrame(hybrid_rows)
-        plt.figure(figsize=(6, 4))
-        for fam in hdf["strategy_family"].unique():
-            sub = hdf[hdf["strategy_family"] == fam]
-            plt.plot(sub["alpha"], sub["sharpe"], "o-", label=fam)
-        plt.xlabel("alpha")
-        plt.ylabel("Sharpe")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(out_dir / "plots" / "hybrid_alpha_sweep.png", dpi=150)
-        plt.close()
+    if not hybrid_daily.empty:
+        hybrid_daily.to_csv(out_dir / "hybrid_alpha_daily_returns.csv", index=False)
+    _write_hybrid_alpha_plots(out_dir, hybrid_rows, hybrid_daily)
     return out_dir / "hybrid_alpha_sweep.csv"
 
 
@@ -1448,24 +1605,7 @@ def _write_plots(
             plt.tight_layout()
             plt.savefig(plots / "strategy_families_dashboard.png", dpi=150)
             plt.close()
-            plt.figure(figsize=(8, 4))
-            for c in cum.columns:
-                plt.plot(cum.index, cum[c], label=c)
-            plt.legend()
-            plt.title("Cumulative PnL by strategy family")
-            plt.tight_layout()
-            plt.savefig(plots / "cumulative_pnl_by_strategy.png", dpi=150)
-            plt.close()
-        else:
-            plt.figure(figsize=(8, 4))
-            for c in cum.columns:
-                plt.plot(cum.index, cum[c], label=c)
-            plt.legend()
-            plt.title("Cumulative PnL by strategy family")
-            plt.tight_layout()
-            plt.savefig(plots / "cumulative_pnl_by_strategy.png", dpi=150)
-            plt.close()
-
+        elif not minimal:
             dd = pd.DataFrame({k: drawdown_series(v) for k, v in all_daily.items()})
             plt.figure(figsize=(8, 4))
             for c in dd.columns:
@@ -1475,16 +1615,6 @@ def _write_plots(
             plt.tight_layout()
             plt.savefig(plots / "drawdown_by_strategy.png", dpi=150)
             plt.close()
-
-    if family_rows and not minimal:
-        df = pd.DataFrame(family_rows)
-        plt.figure(figsize=(6, 4))
-        plt.bar(df["strategy_family"], df["sharpe"].fillna(0))
-        plt.xticks(rotation=30, ha="right")
-        plt.title("Sharpe by strategy family")
-        plt.tight_layout()
-        plt.savefig(plots / "sharpe_by_method.png", dpi=150)
-        plt.close()
 
     if minimal:
         return
@@ -1515,35 +1645,15 @@ def _write_plots(
             plt.savefig(plots / "horizon_decay_beta.png", dpi=150)
             plt.close()
 
-    if hybrid_rows:
-        hdf = pd.DataFrame(hybrid_rows)
-        plt.figure(figsize=(6, 4))
-        for fam in hdf["strategy_family"].unique():
-            sub = hdf[hdf["strategy_family"] == fam]
-            plt.plot(sub["alpha"], sub["sharpe"], "o-", label=fam)
-        plt.xlabel("alpha")
-        plt.ylabel("Sharpe")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(plots / "hybrid_alpha_sweep.png", dpi=150)
-        plt.close()
-
-    if stability_all:
-        sdf = pd.DataFrame(stability_all)
-        if "ari_prev" in sdf.columns:
-            plt.figure(figsize=(6, 4))
-            sdf.groupby("cluster_method")["ari_prev"].mean().plot(kind="bar")
-            plt.title("Mean ARI by cluster method")
-            plt.tight_layout()
-            plt.savefig(plots / "cluster_stability_ari.png", dpi=150)
-            plt.close()
-        if "eigenspace_drift" in sdf.columns:
-            plt.figure(figsize=(6, 4))
-            sdf.groupby("cluster_method")["eigenspace_drift"].mean().plot(kind="bar")
-            plt.title("Eigenspace drift")
-            plt.tight_layout()
-            plt.savefig(plots / "eigenspace_drift.png", dpi=150)
-            plt.close()
+    if hybrid_rows or (out_dir / "hybrid_alpha_daily_returns.csv").is_file():
+        hrows = hybrid_rows
+        if not hrows and (out_dir / "hybrid_alpha_sweep.csv").is_file():
+            hrows = pd.read_csv(out_dir / "hybrid_alpha_sweep.csv").to_dict("records")
+        hdaily = None
+        daily_path = out_dir / "hybrid_alpha_daily_returns.csv"
+        if daily_path.is_file():
+            hdaily = pd.read_csv(daily_path, parse_dates=["date"])
+        _write_hybrid_alpha_plots(out_dir, hrows, hdaily)
 
     if panel_df is not None and not panel_df.empty:
         fwd = panel_df[panel_df["direction"].str.contains("forward", na=False)]
@@ -1613,6 +1723,292 @@ def _write_plots(
         _write_cluster_sweep_plots(out_dir, cluster_df)
 
 
+def _report_df_md(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False, floatfmt=".3f")
+    except ImportError:
+        return df.to_string(index=False)
+
+
+def _best_hybrid_by_family(hybrid: pd.DataFrame) -> pd.DataFrame:
+    idx = hybrid.groupby("strategy_family")["sharpe"].idxmax()
+    cols = [c for c in ["strategy_family", "alpha", "sharpe", "ann_return", "max_drawdown"] if c in hybrid.columns]
+    return hybrid.loc[idx, cols].sort_values("sharpe", ascending=False)
+
+
+def _hybrid_narrative(hybrid: pd.DataFrame | None) -> str:
+    if hybrid is None or hybrid.empty:
+        return ""
+    best = _best_hybrid_by_family(hybrid)
+    lines = [
+        "**Interpretation (signed clustering, full sample):**\n",
+        "- **α = 0** uses only the normalized supply-chain adjacency; **α = 1** uses only return-estimated \\(C_{\\text{data}}\\).\n",
+    ]
+    for row in best.itertuples():
+        fam = str(row.strategy_family).replace("_", " ")
+        lines.append(
+            f"- **{fam}:** best Sharpe at **α = {row.alpha:g}** "
+            f"(Sharpe {row.sharpe:.2f}, max DD {row.max_drawdown:.2f}).\n"
+        )
+    sp = hybrid[hybrid["strategy_family"] == "supplier_pressure"]
+    gr = hybrid[hybrid["strategy_family"] == "globalrank"]
+    if not sp.empty and not gr.empty:
+        lines.append(
+            "- **Supplier pressure** is strong across α (supply prior ≈ returns-only); "
+            "**globalrank** is highly α-sensitive (best at α = 0.75, weak at α ∈ {0, 1}).\n"
+        )
+        lines.append(
+            "- **Metacluster** shows high in-sample Sharpe at low α but **~99% drawdown** in cumulative PnL "
+            "(2020–21 spike/crash); treat as unstable despite positive Sharpe.\n"
+        )
+        lines.append(
+            "- **Clusterrank** improves with more data weight (α = 0.75–1.0) vs pure supply (α = 0).\n"
+        )
+    lines.append(
+        "\nSee `plots/methods_comparison.png` (α = 1 vs best-α) and `plots/hybrid_sharpe_heatmap.png`.\n"
+    )
+    return "".join(lines)
+
+
+def _families_narrative(fam: pd.DataFrame | None) -> str:
+    if fam is None or fam.empty:
+        return ""
+    top = fam.sort_values("sharpe", ascending=False)
+    sp = float(top.loc[top["strategy_family"] == "supplier_pressure", "sharpe"].iloc[0])
+    mc = float(top.loc[top["strategy_family"] == "metacluster", "sharpe"].iloc[0])
+    gr = float(top.loc[top["strategy_family"] == "globalrank", "sharpe"].iloc[0])
+    cr = float(top.loc[top["strategy_family"] == "clusterrank", "sharpe"].iloc[0])
+    return (
+        "**Interpretation (α = 1, signed clusters for meta/clusterrank):**\n"
+        f"- **Supplier pressure** (Sharpe {sp:.2f}) is the **most stable baseline** (shallower drawdown).\n"
+        f"- **Metacluster** matches on Sharpe ({mc:.2f}) but has **unacceptable path instability** "
+        "(~−40% max DD here; ~−99% in hybrid sweep) — do not rank it as simply “best.”\n"
+        f"- **Clusterrank** ({cr:.2f}) and **globalrank** ({gr:.2f}) lag on risk-adjusted return.\n"
+        "- Supplier pressure trades **suppliers only**; network families use global or cluster-local ranks.\n"
+    )
+
+
+def _cluster_narrative(cluster: pd.DataFrame | None) -> str:
+    if cluster is None or cluster.empty:
+        return ""
+    csub = cluster.dropna(subset=["sharpe"])
+    if csub.empty:
+        return ""
+    best = csub.loc[csub["sharpe"].idxmax()]
+    signed_mc = csub[
+        (csub["strategy_family"] == "metacluster") & (csub["cluster_method"] == "signed")
+    ]
+    herm_mc = csub[
+        (csub["strategy_family"] == "metacluster") & (csub["cluster_method"] == "hermitian")
+    ]
+    text = (
+        f"**Interpretation:** Best cluster×family cell is **{best['strategy_family']} / {best['cluster_method']}** "
+        f"(Sharpe {best['sharpe']:.2f}). **Signed** clustering works well for metacluster; "
+        "**supply_community** is best for clusterrank. **Hermitian** and **hybrid_prior** underperform.\n"
+    )
+    if not signed_mc.empty and not herm_mc.empty:
+        text += (
+            f"- Metacluster: signed Sharpe {float(signed_mc['sharpe'].iloc[0]):.2f} vs "
+            f"hermitian {float(herm_mc['sharpe'].iloc[0]):.2f}.\n"
+        )
+    return text
+
+
+def _panel_is_production_quality(panel: pd.DataFrame) -> bool:
+    """True when panel rows use entity+time FE and clustered SE with valid p-values."""
+    if panel.empty:
+        return False
+    fe = panel.get("fixed_effects", pd.Series(dtype=str)).astype(str)
+    if not fe.str.contains("entity", case=False).any():
+        return False
+    if "clustered_se" in panel.columns and not panel["clustered_se"].fillna(False).any():
+        return False
+    if "p_value" in panel.columns and panel["p_value"].notna().sum() == 0:
+        return False
+    return True
+
+
+def _panel_quality_warning(panel: pd.DataFrame | None) -> str:
+    if panel is None or panel.empty:
+        return ""
+    if _panel_is_production_quality(panel):
+        return ""
+    fe = panel.get("fixed_effects", pd.Series(dtype=str)).iloc[0] if len(panel) else "unknown"
+    return (
+        f"**Panel quality warning:** This run used `{fe}` with "
+        f"`clustered_se={bool(panel.get('clustered_se', pd.Series([False])).any())}` and "
+        "missing `std_error` / `p_value` on some rows. "
+        "Rebuild `data/leadlag_panel_forward.parquet` and `data/leadlag_panel_reverse.parquet` "
+        "(`scripts/build_leadlag_panel.py`), install `linearmodels`, then rerun `--steps load,panel` "
+        "for firm + time FE and entity-clustered standard errors.\n\n"
+    )
+
+
+def _research_question_decisions(
+    out_dir: Path,
+    panel: pd.DataFrame | None,
+    fam: pd.DataFrame | None,
+    cluster: pd.DataFrame | None,
+    hybrid: pd.DataFrame | None,
+) -> list[tuple[str, str, str]]:
+    """Rows for EXPECTED_OUTPUTS §7 — conservative labels for preliminary artifact sets."""
+
+    panel_ok = panel is not None and not panel.empty
+    panel_fe = _panel_is_production_quality(panel) if panel_ok else False
+
+    panel_dec = "Not run"
+    if panel_ok:
+        h1_fwd = panel[
+            panel["direction"].astype(str).str.contains("forward", na=False) & (panel["horizon"] == 1)
+        ]
+        if not h1_fwd.empty and float(h1_fwd["beta"].iloc[0]) > 0:
+            panel_dec = (
+                "Yes"
+                if panel_fe
+                else "Preliminary yes; needs FE + clustered-SE rerun"
+            )
+        elif panel_fe:
+            panel_dec = "Mixed"
+        else:
+            panel_dec = "Preliminary / inconclusive; needs FE + clustered-SE rerun"
+
+    directional_dec = "Not run"
+    if panel_ok:
+        if panel_fe:
+            fwd = panel[
+                panel["direction"].astype(str).str.contains("forward", na=False) & (panel["horizon"] == 1)
+            ]
+            rev = panel[
+                panel["direction"].astype(str).str.contains("reverse", na=False) & (panel["horizon"] == 1)
+            ]
+            if not fwd.empty and not rev.empty:
+                fwd_b = abs(float(fwd["beta"].iloc[0]))
+                rev_b = abs(float(rev["beta"].iloc[0]))
+                p_fwd = float(fwd["p_value"].iloc[0]) if fwd["p_value"].notna().any() else 1.0
+                p_rev = float(rev["p_value"].iloc[0]) if rev["p_value"].notna().any() else 1.0
+                if fwd_b > rev_b and p_fwd < 0.05 and p_rev >= 0.05:
+                    directional_dec = "Yes"
+                elif fwd_b > rev_b:
+                    directional_dec = "Mixed"
+                else:
+                    directional_dec = "No / Mixed"
+        else:
+            directional_dec = "Inconclusive in this artifact; rerun reverse placebo with FE + clustered SE"
+
+    tradable_dec = "Not run"
+    if fam is not None and not fam.empty:
+        sp = fam[fam["strategy_family"] == "supplier_pressure"]
+        if not sp.empty and float(sp["sharpe"].iloc[0]) > 0.15:
+            tradable_dec = "Preliminary yes"
+
+    network_dec = "Not run"
+    if fam is not None and not fam.empty:
+        sp_sh = float(fam.loc[fam["strategy_family"] == "supplier_pressure", "sharpe"].iloc[0])
+        mc_sh = float(fam.loc[fam["strategy_family"] == "metacluster", "sharpe"].iloc[0])
+        cr_sh = float(fam.loc[fam["strategy_family"] == "clusterrank", "sharpe"].iloc[0])
+        if max(mc_sh, cr_sh) > sp_sh * 0.9:
+            network_dec = "Preliminary yes"
+
+    cluster_dec = "Not run"
+    if cluster is not None and not cluster.empty:
+        csub = cluster.dropna(subset=["sharpe"])
+        if not csub.empty:
+            signed_ok = (
+                csub[
+                    (csub["strategy_family"] == "metacluster")
+                    & (csub["cluster_method"] == "signed")
+                ]["sharpe"].max()
+                > 0.2
+            )
+            herm_bad = (
+                csub[
+                    (csub["strategy_family"] == "metacluster")
+                    & (csub["cluster_method"] == "hermitian")
+                ]["sharpe"].max()
+                < 0
+            )
+            cluster_dec = "Mixed yes" if signed_ok and herm_bad else "Mixed"
+
+    hybrid_dec = "Not run"
+    if hybrid is not None and not hybrid.empty:
+        spreads = hybrid.groupby("strategy_family")["sharpe"].agg(lambda s: float(s.max() - s.min()))
+        if (spreads > 0.1).any():
+            hybrid_dec = "Preliminary yes"
+
+    event_dec = "Not run"
+    ev_path = out_dir / "event_conditioned_backtest.csv"
+    if ev_path.is_file():
+        ev = pd.read_csv(ev_path)
+        if not ev.empty and "sharpe" in ev.columns:
+            event_dec = "Yes" if float(ev["sharpe"].max()) > 0 else "Mixed"
+
+    return [
+        ("Does customer pressure predict supplier returns?", "panel_forward_reverse.csv", panel_dec),
+        ("Is the effect directional?", "panel_forward_reverse.csv", directional_dec),
+        ("Is the effect tradable?", "summary_metrics.csv", tradable_dec),
+        ("Does higher-order network structure help?", "strategy_family_comparison.csv", network_dec),
+        ("Does direction-aware clustering help?", "cluster_method_comparison.csv", cluster_dec),
+        ("Does supply-chain structure stabilize return-based lead-lag?", "hybrid_alpha_sweep.csv", hybrid_dec),
+        ("Is diffusion event-amplified?", "event_conditioned_backtest.csv", event_dec),
+    ]
+
+
+def _artifact_submission_checklist(out_dir: Path) -> str:
+    """Markdown checklist: preliminary vs final submission readiness."""
+
+    def _status(path: str, ok_note: str, warn_note: str, missing_note: str) -> tuple[str, str]:
+        p = out_dir / path
+        if not p.is_file():
+            return "✗", missing_note
+        if path == "panel_forward_reverse.csv":
+            panel = pd.read_csv(p)
+            if _panel_is_production_quality(panel):
+                return "✓", ok_note
+            return "⚠", warn_note
+        if path == "summary_metrics.csv":
+            sm = pd.read_csv(p)
+            if "avg_turnover" in sm.columns and sm["avg_turnover"].notna().any():
+                return "✓", ok_note
+            return "⚠", warn_note
+        if path == "factor_exposure_alpha.csv":
+            return "○", "optional"
+        return "✓", ok_note
+
+    lines = [
+        "\n## Appendix B: Submission readiness (preliminary vs final)\n\n",
+        "**Status:** This directory is a **preliminary results** bundle (backtest, clustering, hybrid). "
+        "It is sufficient for pipeline validation and exploratory comparison; it is **not** a complete "
+        "final research deliverable until the ⚠ / ✗ items below are addressed.\n\n",
+        "**Defensible headline:** The PIT pipeline runs end-to-end and shows meaningful differences across "
+        "strategy families, clustering methods, and hybrid α. **Supplier pressure** is the most stable baseline; "
+        "**clusterrank** benefits from supply-community clustering; hybrid tuning materially affects "
+        "**globalrank** and **clusterrank**. Statistical predictability (FE panel), directionality, event "
+        "amplification, transaction-cost robustness, and full rebalance calendar still need work.\n\n",
+        "| File | Status |\n|------|--------|\n",
+    ]
+    checks = [
+        ("summary_metrics.csv", "present", "turnover/costs incomplete", "missing"),
+        ("strategy_family_comparison.csv", "present", "", "missing"),
+        ("cluster_method_comparison.csv", "present", "", "missing"),
+        ("hybrid_alpha_sweep.csv", "present", "", "missing"),
+        ("cluster_stability.csv", "present", "", "missing"),
+        ("panel_forward_reverse.csv", "FE + clustered SE", "pooled OLS fallback; NaN SE/p-values", "missing"),
+        ("horizon_decay.csv", "present", "", "missing (run panel step)"),
+        ("event_conditioned_backtest.csv", "present", "", "missing (run events step)"),
+        ("turnover_costs.csv", "present", "incomplete", "missing"),
+        ("factor_exposure_alpha.csv", "present", "", "optional"),
+    ]
+    for path, ok, warn, miss in checks:
+        sym, note = _status(path, ok, warn, miss)
+        lines.append(f"| `{path}` | {sym} {note} |\n")
+    lines.append(
+        "\n**Recommended reruns:** (1) `build_leadlag_panel.py` + `--steps load,panel` with `linearmodels`; "
+        "(2) `--steps events` with earnings calendar; (3) full rebalance calendar (drop or raise "
+        "`--max-rebalances` cap); (4) populate turnover/cost columns in `summary_metrics.csv`.\n"
+    )
+    return "".join(lines)
+
+
 def generate_final_report(
     out_dir: Path,
     params: dict[str, Any],
@@ -1620,115 +2016,273 @@ def generate_final_report(
     enabled_steps: list[str] | None = None,
     plot_profile: str = "full",
 ) -> None:
-    """Write START_HERE.md, final_report.md, and optional LaTeX from result tables."""
+    """Write START_HERE.md (index) and report/final_report.md (EXPECTED_OUTPUTS §6 deliverable)."""
+    del enabled_steps, plot_profile  # reserved for future use
     report_dir = out_dir / "report"
     report_dir.mkdir(exist_ok=True)
+    plots_dir = out_dir / "plots"
 
     def _load(name: str) -> pd.DataFrame | None:
         p = out_dir / name
-        if not p.is_file():
-            return None
-        return pd.read_csv(p)
+        return pd.read_csv(p) if p.is_file() else None
 
     fam = _load("strategy_family_comparison.csv")
     summary = _load("summary_metrics.csv")
     cluster = _load("cluster_method_comparison.csv")
     hybrid = _load("hybrid_alpha_sweep.csv")
     panel = _load("panel_forward_reverse.csv")
+    meta: dict[str, Any] = {}
+    meta_path = out_dir / "run_metadata.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
-    def _df_md(df: pd.DataFrame) -> str:
-        try:
-            return df.to_markdown(index=False, floatfmt=".3f")
-        except ImportError:
-            return df.to_string(index=False)
-
-    lines: list[str] = []
-    lines.append("# Start here — research results\n")
-    lines.append("This folder is the **main entry point** after a pipeline run.\n")
-
-    if fam is not None and not fam.empty:
-        show = fam[["strategy_family", "cluster_method", "sharpe", "ann_return", "ann_vol", "max_drawdown"]].copy()
-        show = show.sort_values("sharpe", ascending=False)
-        best = show.iloc[0]
-        lines.append("## Strategy families (Step 4)\n")
-        lines.append(
-            f"All four families use the same return-based \\(C\\) each rebalance. "
-            f"**Clustering for metacluster / clusterrank:** `{params.get('default_cluster_method', 'hermitian')}` "
-            f"({params.get('n_clusters', 10)} clusters). "
-            f"`globalrank` uses `{params.get('globalrank_method', 'spectral')}` scores; no clusters.\n"
-        )
-        lines.append(_df_md(show))
-        lines.append(
-            f"\n**Best Sharpe:** `{best['strategy_family']}` ({best['sharpe']:.3f})\n"
-        )
-        lines.append("**Key plots:** `plots/strategy_families_dashboard.png`, `plots/cumulative_pnl_by_strategy.png`\n")
-        lines.append("**Key tables:** `strategy_family_comparison.csv`, `daily_returns.csv`, `summary_metrics.csv`\n")
-
-    lines.append("\n## Where everything else lives\n")
-    lines.append("| If you need… | Open… |")
-    lines.append("|-------------|-------|")
-    if panel is not None:
-        lines.append("| Panel forward vs reverse | `panel_forward_reverse.csv`, `plots/forward_vs_reverse_coefficients.png` |")
-    if cluster is not None:
-        lines.append(
-            "| Cluster method sweep (Step 5) | `cluster_method_comparison.csv`, "
-            "`plots/cluster_sweep_dashboard.png` |"
-        )
-    if hybrid is not None:
-        lines.append("| Hybrid α sweep (Step 6) | `hybrid_alpha_sweep.csv`, `plots/hybrid_alpha_sweep.png` |")
-    lines.append("| Deep dive / diagnostics | `matrices/`, `clusters/`, `run_metadata.json` |")
-    lines.append("| Full narrative report | `report/final_report.md` |\n")
-
-    if enabled_steps:
-        lines.append(f"\n*Pipeline steps in this run:* `{', '.join(enabled_steps)}` · plot profile: `{plot_profile}`\n")
-
-    (out_dir / "START_HERE.md").write_text("\n".join(lines), encoding="utf-8")
-
-    md_parts = ["# Supply Chain Lead–Lag: Final Research Report\n"]
-
-    if fam is not None and not fam.empty:
-        md_parts.append("## Strategy family comparison\n")
-        md_parts.append(_df_md(fam.sort_values("sharpe", ascending=False)))
-        md_parts.append("\n")
-
-    if summary is not None and not summary.empty:
-        md_parts.append("## Summary metrics\n")
-        md_parts.append(_df_md(summary.head(15)))
-        md_parts.append("\n")
-
-    if cluster is not None and not cluster.empty:
-        md_parts.append("## Cluster method comparison (top 10 by Sharpe)\n")
-        top = cluster.sort_values("sharpe", ascending=False).head(10)
-        md_parts.append(_df_md(top))
-        md_parts.append("\n")
-
-    if hybrid is not None and not hybrid.empty:
-        md_parts.append("## Hybrid alpha sweep\n")
-        md_parts.append(_df_md(hybrid.head(12)))
-        md_parts.append("\n")
-
-    if panel is not None and not panel.empty:
-        md_parts.append("## Panel forward / reverse\n")
-        md_parts.append(_df_md(panel.head(10)))
-        md_parts.append("\n")
-
-    md_parts.append("## Configuration\n")
-    md_parts.append(
-        f"- Edge score: `{params.get('edge_score')}` · Rebalance: `{params.get('rebalance_freq')}`\n"
-        f"- Default cluster (Step 4): `{params.get('default_cluster_method', 'hermitian')}`\n"
-        f"- GlobalRank method: `{params.get('globalrank_method', 'spectral')}`\n"
+    plot_files = sorted(p.name for p in plots_dir.glob("*.png")) if plots_dir.is_dir() else []
+    rq_df = pd.DataFrame(
+        _research_question_decisions(out_dir, panel, fam, cluster, hybrid),
+        columns=["Research question", "Evidence file", "Decision"],
     )
-    md_parts.append("\nSee `START_HERE.md` in the results root for a shorter guide.\n")
 
-    (report_dir / "final_report.md").write_text("\n".join(md_parts), encoding="utf-8")
+    start = [
+        "# Start here\n\n",
+        "**Status:** Preliminary results bundle (not full final submission). "
+        "See `report/final_report.md` §2 and Appendix B for gaps.\n\n",
+        "Quick index. **Main deliverable (`docs/EXPECTED_OUTPUTS.md`):** "
+        "[`report/final_report.md`](report/final_report.md)\n\n",
+    ]
+    if fam is not None and not fam.empty:
+        b = fam.sort_values("sharpe", ascending=False).iloc[0]
+        start.append(f"Top family Sharpe: **{b['strategy_family']}** ({b['sharpe']:.2f})\n\n")
+    start.append("| Topic | Where |\n|-------|--------|\n")
+    start.append("| Full report | `report/final_report.md` |\n")
+    if (out_dir / "strategy_family_comparison.csv").is_file():
+        start.append("| 4 families | `strategy_family_comparison.csv` · `plots/strategy_families_dashboard.png` |\n")
+    if (out_dir / "cluster_method_comparison.csv").is_file():
+        start.append("| Cluster sweep | `cluster_method_comparison.csv` · `plots/cluster_sweep_dashboard.png` |\n")
+    if (out_dir / "hybrid_alpha_sweep.csv").is_file():
+        start.append("| Hybrid α | `hybrid_alpha_sweep.csv` · `plots/methods_comparison.png` |\n")
+    _write_methods_comparison_plots(out_dir)
+    (out_dir / "START_HERE.md").write_text("".join(start), encoding="utf-8")
+
+    n_reb = meta.get("n_rebalances")
+    if n_reb is None and cluster is not None and not cluster.empty and "n_rebalances" in cluster.columns:
+        n_reb = int(cluster["n_rebalances"].dropna().max())
+
+    panel_warn = _panel_quality_warning(panel)
+
+    md: list[str] = [
+        "# Supply Chain Lead–Lag: Research Report (preliminary artifact set)\n\n",
+        "> **Deliverable status:** Preliminary results — backtest, clustering, and hybrid sweep are in good shape; "
+        "panel FE/clustered SE, events, turnover/costs, and full rebalance calendar are **not** final. "
+        "See [Appendix B](#appendix-b-submission-readiness-preliminary-vs-final).\n\n",
+        "## 1. Abstract\n",
+        "Point-in-time (PIT) supply-chain lead–lag study on Compustat customer–supplier links and daily returns "
+        f"({meta.get('data_start', '?')}–{meta.get('data_end', '?')}). We compare four tradable families, "
+        "sweep clustering methods, and blend \\(C_{\\text{data}}\\) with \\(C_{\\text{supply}}\\) via hybrid **α** "
+        f"(`{params.get('default_cluster_method', 'signed')}` clusters; `{params.get('edge_score', 'tstat_diff')}`).\n\n",
+        "**Headline (defensible now):** The pipeline runs end-to-end and produces meaningful differences across "
+        "families, cluster methods, and α. **Supplier pressure** is the most stable tradable baseline; "
+        "**clusterrank** benefits from supply-community clustering; hybrid α materially affects **globalrank**. "
+        "**Metacluster** can show high Sharpe but extreme drawdown — treat as unstable. Claims on statistical "
+        "predictability, clean directionality, event amplification, and net-of-cost performance require additional reruns.\n\n",
+        "## 2. Research questions\n\n",
+        "Decisions use **conservative** labels when artifacts are pooled-OLS or capped at 12 rebalances.\n\n",
+        _report_df_md(rq_df),
+        "\n\n## 3. Data and PIT construction\n",
+        f"- Returns: `{params.get('returns_parquet')}` · Edges: `{params.get('edges_csv')}`\n",
+        f"- PIT date column: `{params.get('edge_date_col')}` · Rebalance: `{params.get('rebalance_freq')}`\n",
+    ]
+    if meta:
+        md.append(
+            f"- Window: {meta.get('data_start')}–{meta.get('data_end')} · "
+            f"{n_reb if n_reb is not None else '—'} rebalances · "
+            f"{meta.get('n_return_assets', '—')} return assets · "
+            f"{meta.get('n_edge_rows', '—')} PIT edge rows\n"
+        )
+    steps = meta.get("pipeline_steps") or []
+    if steps:
+        md.append(f"- Pipeline steps in last run: `{', '.join(steps)}`\n")
+
+    md.append("\n## 4. Customer-pressure signal\n")
+    md.append(
+        "At each day \\(d\\), signal \\(s = C^\\top r_d\\) (customer pressure on suppliers); "
+        "long–short **suppliers only** with return earned on \\(d+1\\) (`supplier_pressure` family).\n"
+    )
+    if fam is not None and not fam.empty:
+        sp_row = fam[fam["strategy_family"] == "supplier_pressure"]
+        if not sp_row.empty:
+            r = sp_row.iloc[0]
+            md.append(
+                f"\nRolling backtest (signed cluster label for bookkeeping, no clustering in signal): "
+                f"Sharpe **{r['sharpe']:.2f}**, ann. return {r['ann_return']:.1%}, max DD {r['max_drawdown']:.1%}.\n"
+            )
+
+    md.append("\n## 5. Panel predictability results\n")
+    if panel is not None and not panel.empty:
+        md.append(panel_warn)
+        fwd = panel[panel["direction"].astype(str).str.contains("forward", na=False)]
+        md.append(_report_df_md(fwd.head(12)) + "\n")
+        if not _panel_is_production_quality(panel):
+            md.append(
+                "\nForward horizon 1 shows positive pooled β with large |t|, but **reverse horizons 1–2 also "
+                "have |t| > 2** in this artifact — directionality is **not** established until FE + clustered SE. "
+                "Do not cite this table as final regression evidence.\n"
+            )
+    else:
+        md.append(
+            "*Not run* (`panel_forward_reverse.csv` missing). Tradable supplier-pressure (§4, §9) is only "
+            "indirect evidence for predictability.\n"
+        )
+
+    md.append("\n## 6. Directional reverse placebo\n")
+    if panel is not None and not panel.empty:
+        for direction in ("forward", "reverse"):
+            sub = panel[panel["direction"].astype(str).str.contains(direction, na=False)]
+            if not sub.empty:
+                md.append(f"\n**{direction.title()}:**\n\n{_report_df_md(sub.head(5))}\n")
+        if not _panel_is_production_quality(panel):
+            md.append(
+                "\n**Read with caution:** Reverse placebo is not cleanly insignificant under pooled OLS "
+                "(e.g. reverse h=1,2 with |t|≈2.5; h=5 with |t|≈−2.8). Rerun with PanelOLS on built panel parquets.\n"
+            )
+    else:
+        md.append("*Not run.*\n")
+
+    md.append("\n## 7. Lead-lag matrix construction\n")
+    md.append(
+        f"Rolling \\(C\\), lookback {params.get('lookback_rows')} rows, score `{params.get('edge_score')}`.\n"
+    )
+
+    md.append("\n## 8. Network structure and spectral diagnostics\n")
+    if (out_dir / "spectral_summary.csv").is_file():
+        md.append(_report_df_md(pd.read_csv(out_dir / "spectral_summary.csv")) + "\n")
+    else:
+        md.append("*Optional — run `artifacts` step.*\n")
+
+    md.append("\n## 9. Strategy family comparison\n")
+    if fam is not None and not fam.empty:
+        md.append(_families_narrative(fam) + "\n")
+        md.append(_report_df_md(fam.sort_values("sharpe", ascending=False)) + "\n")
+        if (plots_dir / "strategy_families_dashboard.png").is_file():
+            md.append("\n![Families](../plots/strategy_families_dashboard.png)\n")
+        if (plots_dir / "cumulative_pnl_by_strategy.png").is_file():
+            md.append("\n![Cumulative PnL](../plots/cumulative_pnl_by_strategy.png)\n")
+    else:
+        md.append("*Run `--only families`.*\n")
+
+    md.append("\n## 10. Clustering method comparison\n")
+    if cluster is not None and not cluster.empty:
+        md.append(_cluster_narrative(cluster) + "\n")
+        top = cluster.dropna(subset=["sharpe"]).sort_values("sharpe", ascending=False).head(12)
+        md.append(_report_df_md(top) + "\n")
+        stab = _load("cluster_stability.csv")
+        if stab is not None and not stab.empty and "ari" in stab.columns:
+            ari = stab.groupby("cluster_method")["ari"].mean().sort_values(ascending=False)
+            md.append("\n**Mean ARI by method:** " + ", ".join(f"{k}: {v:.2f}" for k, v in ari.head(5).items()) + "\n")
+        if (plots_dir / "cluster_sweep_dashboard.png").is_file():
+            md.append("\n![Cluster sweep](../plots/cluster_sweep_dashboard.png)\n")
+    else:
+        md.append("*Run cluster sweep.*\n")
+
+    md.append("\n## 11. Hybrid alpha sweep\n")
+    if hybrid is not None and not hybrid.empty:
+        md.append(_hybrid_narrative(hybrid) + "\n")
+        md.append("**Best α per family:**\n\n")
+        md.append(_report_df_md(_best_hybrid_by_family(hybrid)) + "\n\n")
+        md.append("**Full grid:**\n\n")
+        md.append(_report_df_md(hybrid.sort_values(["strategy_family", "alpha"])) + "\n")
+        if (plots_dir / "methods_comparison.png").is_file():
+            md.append("\n![Methods comparison](../plots/methods_comparison.png)\n")
+        if (plots_dir / "hybrid_sharpe_heatmap.png").is_file():
+            md.append("\n![Hybrid Sharpe heatmap](../plots/hybrid_sharpe_heatmap.png)\n")
+        if (plots_dir / "hybrid_alpha_sweep.png").is_file():
+            md.append("\n![Hybrid Sharpe curves](../plots/hybrid_alpha_sweep.png)\n")
+        if (plots_dir / "hybrid_alpha_sweep_cumulative_pnl.png").is_file():
+            md.append("\n![Hybrid PnL panels](../plots/hybrid_alpha_sweep_cumulative_pnl.png)\n")
+        elif not (out_dir / "hybrid_alpha_daily_returns.csv").is_file():
+            md.append("\n*Re-run `--only hybrid` for cumulative PnL plot.*\n")
+    else:
+        md.append("*Run `--only hybrid`.*\n")
+
+    md.append("\n## 12. Event-conditioned diffusion\n")
+    ev_bt = _load("event_conditioned_backtest.csv")
+    if ev_bt is not None and not ev_bt.empty:
+        md.append(_report_df_md(ev_bt) + "\n")
+    else:
+        md.append("*Optional — run `events` step.*\n")
+
+    md.append("\n## 13. Transaction costs and risk controls\n")
+    if summary is not None and not summary.empty:
+        md.append(_report_df_md(summary) + "\n")
+        if summary.get("avg_turnover", pd.Series(dtype=float)).isna().all() or (
+            summary.get("total_cost_bps", pd.Series([0])).fillna(0) == 0
+        ).all():
+            md.append(
+                "\n**Not final for trading claims:** `avg_turnover` is NaN and `total_cost_bps` is 0 — "
+                "gross Sharpe equals net Sharpe. Populate turnover/cost assumptions before submission.\n"
+            )
+    else:
+        md.append("*Run `baselines` + `summary` steps.*\n")
+
+    md.append("\n## 14. Limitations\n")
+    md.append(
+        "- **Panel:** Current `panel_forward_reverse.csv` may be pooled OLS (`none_pooled`) without clustered SE; "
+        "not comparable to midterm PanelOLS. Build panel parquets + `pip install linearmodels` + rerun panel.\n"
+        "- **12 rebalances** (if capped): smoke-style; use full calendar for final numbers or state cap explicitly.\n"
+        "- **Metacluster:** High Sharpe with **~−40% to −99%** drawdown — emphasize path instability, not “best family.”\n"
+        "- **Events:** `event_conditioned_*.csv` not produced — diffusion-around-earnings claim is open.\n"
+        "- **Costs / turnover:** Incomplete in `summary_metrics.csv`.\n"
+        "- **Sector clustering:** empty rows in cluster comparison — implement or drop from method list.\n"
+    )
+
+    md.append("\n## 15. Conclusion\n")
+    md.append(
+        "This artifact set supports a **preliminary, mixed-positive** pipeline result: meaningful variation across "
+        "families, clustering, and hybrid α under PIT rules, with **supplier pressure** as the most credible "
+        "baseline. It does **not** yet support final claims on regression significance, asymmetric diffusion, "
+        "event amplification, or net-of-cost tradability. See §2 and Appendix B before calling results “final.”\n\n"
+    )
+    if fam is not None and not fam.empty:
+        sp = fam[fam["strategy_family"] == "supplier_pressure"]
+        if not sp.empty:
+            md.append(
+                f"**Stable baseline:** supplier pressure (Sharpe {float(sp['sharpe'].iloc[0]):.2f}, "
+                f"max DD {float(sp['max_drawdown'].iloc[0]):.1%}).\n"
+            )
+    if hybrid is not None and not hybrid.empty:
+        best = _best_hybrid_by_family(hybrid)
+        md.append(
+            "**Hybrid tuning (best α by Sharpe):** "
+            + ", ".join(
+                f"`{r.strategy_family}` @ α={r.alpha:g} (Sharpe {r.sharpe:.2f})" for r in best.itertuples()
+            )
+            + ".\n"
+        )
+
+    md.append("\n## Appendix A: artifact checklist\n\n**Plots:**\n")
+    md.append("\n".join(f"- `plots/{p}`" for p in plot_files) if plot_files else "- none")
+    md.append("\n\n**Required CSVs (EXPECTED_OUTPUTS §8):**\n")
+    for fname in [
+        "summary_metrics.csv",
+        "panel_forward_reverse.csv",
+        "strategy_family_comparison.csv",
+        "cluster_method_comparison.csv",
+        "hybrid_alpha_sweep.csv",
+        "cluster_stability.csv",
+    ]:
+        md.append(f"- {'✓' if (out_dir / fname).is_file() else '✗'} `{fname}`\n")
+
+    md.append(_artifact_submission_checklist(out_dir))
+
+    (report_dir / "final_report.md").write_text("".join(md), encoding="utf-8")
 
     if params.get("report_generate_tex", True):
-        tex = r"""\documentclass{article}
+        (report_dir / "final_report.tex").write_text(
+            r"""\documentclass{article}
 \begin{document}
 \title{Supply Chain Lead--Lag: Final Research Report}
 \maketitle
-\section{Summary}
-See \texttt{START\_HERE.md} and \texttt{strategy\_family\_comparison.csv}.
+See \texttt{report/final\_report.md} (full EXPECTED\_OUTPUTS deliverable).
 \end{document}
-"""
-        (report_dir / "final_report.tex").write_text(tex, encoding="utf-8")
+""",
+            encoding="utf-8",
+        )

@@ -31,7 +31,7 @@ matrix:
 clustering:
   n_clusters: 10
   random_state: 42
-  default_cluster_method: hermitian
+  default_cluster_method: signed
   methods:
   - sector
   - supply_community

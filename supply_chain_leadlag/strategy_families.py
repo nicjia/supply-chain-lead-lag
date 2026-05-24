@@ -112,7 +112,8 @@ def run_strategy_family(
     elif family == "globalrank":
         if res is None:
             raise ValueError("globalrank requires LeadLagResult `res`")
-        C_res = leadlag_result_replace_C(res, C_use) if hybrid_alpha is not None else res
+        # Always rank from C_use (pure data, blended, or supply-only when caller pre-blends C).
+        C_res = leadlag_result_replace_C(res, C_use)
         sc = scores_from_result(
             C_res,
             method=globalrank_method,  # type: ignore[arg-type]
