@@ -88,6 +88,7 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "pipeline_steps": pipeline.get("steps"),
         "plot_profile": report.get("plot_profile", "full"),
         "strategy_families": list(families),
+        "cluster_sweep_families": strat.get("cluster_sweep_families"),
         "q": float(strat.get("q", 0.2)),
         "rebalance_freq": str(strat.get("rebalance_freq", "BME")),
         "max_rebalances": int(max_reb) if max_reb is not None else None,

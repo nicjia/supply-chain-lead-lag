@@ -4,7 +4,7 @@
 
 Quick index. **Main deliverable (`docs/EXPECTED_OUTPUTS.md`):** [`report/final_report.md`](report/final_report.md)
 
-Top family Sharpe: **supplier_pressure** (0.48)
+Top family Sharpe: **supplier_pressure** (0.52)
 
 | Topic | Where |
 |-------|--------|

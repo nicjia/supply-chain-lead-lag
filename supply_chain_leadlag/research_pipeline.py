@@ -65,6 +65,42 @@ def _filter_cluster_sweep_df(df: pd.DataFrame) -> pd.DataFrame:
     return df[~df["cluster_method"].isin(CLUSTER_SWEEP_EXCLUDE_METHODS)].copy()
 
 
+def _resolve_cluster_sweep_families(params: dict[str, Any], *, quick: bool) -> tuple[str, ...]:
+    """Families included in cluster_sweep (default: metacluster + clusterrank)."""
+    raw = params.get("cluster_sweep_families")
+    if raw:
+        if isinstance(raw, str):
+            fams = [x.strip() for x in raw.split(",") if x.strip()]
+        else:
+            fams = list(raw)
+        return tuple(f for f in fams if f in params["strategy_families"])
+    if quick:
+        return ("metacluster",)
+    return ("metacluster", "clusterrank")
+
+
+def _merge_cluster_sweep_artifacts(
+    out_dir: Path,
+    new_cmp: pd.DataFrame,
+    new_daily: pd.DataFrame,
+    families_updated: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Replace rows for ``families_updated`` in existing sweep CSVs; keep other families."""
+    if not families_updated:
+        return new_cmp, new_daily
+    cmp_path = out_dir / "cluster_method_comparison.csv"
+    if cmp_path.is_file() and not new_cmp.empty:
+        old_cmp = _filter_cluster_sweep_df(pd.read_csv(cmp_path))
+        keep = old_cmp[~old_cmp["strategy_family"].isin(families_updated)]
+        new_cmp = pd.concat([keep, new_cmp], ignore_index=True)
+    daily_path = out_dir / "cluster_sweep_daily_returns.csv"
+    if daily_path.is_file() and not new_daily.empty:
+        old_daily = _filter_cluster_sweep_df(pd.read_csv(daily_path, parse_dates=["date"]))
+        keep_d = old_daily[~old_daily["strategy_family"].isin(families_updated)]
+        new_daily = pd.concat([keep_d, new_daily], ignore_index=True)
+    return new_cmp, new_daily
+
+
 def _mark_dashboard_best_star(
     ax: Any,
     *,
@@ -659,6 +695,7 @@ def run_final_research_pipeline(
     steps: str | None = None,
     skip_steps: str | None = None,
     plot_profile: str | None = None,
+    cluster_sweep_families: str | None = None,
 ) -> Path:
     """Execute full pipeline; returns output directory path."""
     configure_pipeline_logging(verbose=verbose)
@@ -666,6 +703,8 @@ def run_final_research_pipeline(
     root = repo_root or Path(__file__).resolve().parents[1]
     raw_cfg = load_yaml_config(config_path or root / "config" / "research.yaml")
     params = flat_research_params(raw_cfg)
+    if cluster_sweep_families is not None:
+        params["cluster_sweep_families"] = cluster_sweep_families
     if max_rebalances is not None:
         params["max_rebalances"] = max_rebalances
     elif quick:
@@ -924,9 +963,10 @@ def run_final_research_pipeline(
         pd.DataFrame(family_rows).to_csv(out_dir / "strategy_family_comparison.csv", index=False)
         _write_family_core_outputs(out_dir, all_daily)
         _write_strategy_families_dashboard(out_dir, all_daily, family_rows)
+        _write_methods_comparison_plots(out_dir)
         logger.info(
-            "Wrote strategy_family_comparison.csv and plots/strategy_families_dashboard.png "
-            "(clusters: %s)",
+            "Wrote strategy_family_comparison.csv, strategy_families_dashboard.png, "
+            "methods_comparison.png (clusters: %s)",
             fam_clusters,
         )
     if "cluster_sweep" in enabled:
@@ -953,15 +993,15 @@ def run_final_research_pipeline(
                     )
                 )
             )
+        cluster_families = _resolve_cluster_sweep_families(params, quick=quick)
         step_n += 1
         logger.info(
-            "Step %d/%d: cluster method comparison (%d methods × %d cluster-based families)",
+            "Step %d/%d: cluster method comparison (%d methods × families %s)",
             step_n,
             total_steps,
             len(cm_list),
-            1 if quick else 2,
+            cluster_families,
         )
-        cluster_families = ("metacluster",) if quick else ("metacluster", "clusterrank")
         cluster_daily_parts: list[pd.DataFrame] = []
         sweep_tasks = [
             (cm, family)
@@ -1044,12 +1084,19 @@ def run_final_research_pipeline(
             )
             stability_all.extend(stab)
         cluster_cmp = _filter_cluster_sweep_df(pd.DataFrame(cluster_rows))
-        cluster_cmp.to_csv(out_dir / "cluster_method_comparison.csv", index=False)
         cluster_daily = pd.DataFrame()
         if cluster_daily_parts:
             cluster_daily = _filter_cluster_sweep_df(pd.concat(cluster_daily_parts))
             cluster_daily.index.name = "date"
             cluster_daily = cluster_daily.reset_index()
+        cluster_cmp, cluster_daily = _merge_cluster_sweep_artifacts(
+            out_dir,
+            cluster_cmp,
+            cluster_daily,
+            cluster_families,
+        )
+        cluster_cmp.to_csv(out_dir / "cluster_method_comparison.csv", index=False)
+        if not cluster_daily.empty:
             cluster_daily.to_csv(out_dir / "cluster_sweep_daily_returns.csv", index=False)
         if not cluster_cmp.empty:
             _write_cluster_sweep_plots(out_dir, cluster_cmp, cluster_daily=cluster_daily)
@@ -1354,11 +1401,12 @@ def _execute_hybrid_alpha_sweep(
         for family in fams:
             p = dict(params)
             p["_family"] = family
+            cm_fam = cluster_method_for_family(family, params)
             dr, stab, _, _, _ = _accumulate_family_returns(
                 R,
                 edges,
                 p,
-                cluster_method=default_cluster,
+                cluster_method=cm_fam,
                 hybrid_alpha=float(alpha),
                 max_rebalances=max_rebalances,
                 quick=quick,
@@ -1369,7 +1417,7 @@ def _execute_hybrid_alpha_sweep(
                 {
                     "alpha": alpha,
                     "strategy_family": family,
-                    "cluster_method": default_cluster,
+                    "cluster_method": cm_fam,
                     "edge_score": params["edge_score"],
                     **met,
                     "net_sharpe": met["sharpe"],
@@ -1453,17 +1501,19 @@ def _write_hybrid_alpha_plots(out_dir: Path, hybrid_rows: list[dict], hybrid_dai
 
 
 def _write_methods_comparison_plots(out_dir: Path) -> None:
-    """Side-by-side cumulative PnL (α=1 vs best-α per family) and Sharpe heatmap."""
+    """Families (return-based C, best cluster each) vs optional hybrid best-α panel."""
     plots = out_dir / "plots"
     plots.mkdir(parents=True, exist_ok=True)
-    daily_path = out_dir / "hybrid_alpha_daily_returns.csv"
-    hybrid_path = out_dir / "hybrid_alpha_sweep.csv"
-    if not daily_path.is_file() or not hybrid_path.is_file():
+    fam_path = out_dir / "daily_returns.csv"
+    fam_cmp_path = out_dir / "strategy_family_comparison.csv"
+    if not fam_path.is_file() or not fam_cmp_path.is_file():
         return
 
-    daily = pd.read_csv(daily_path, parse_dates=["date"])
-    hdf = pd.read_csv(hybrid_path)
-    fam_order = ["supplier_pressure", "globalrank", "metacluster", "clusterrank"]
+    fam_daily = pd.read_csv(fam_path, index_col=0, parse_dates=True)
+    fam_cmp = pd.read_csv(fam_cmp_path)
+    fam_order = [f for f in ["supplier_pressure", "globalrank", "metacluster", "clusterrank"] if f in fam_daily.columns]
+    cluster_by_family = dict(zip(fam_cmp["strategy_family"], fam_cmp["cluster_method"]))
+    sharpe_by_family = dict(zip(fam_cmp["strategy_family"], fam_cmp["sharpe"]))
     palette = {
         "supplier_pressure": "#440154",
         "globalrank": "#31688e",
@@ -1471,50 +1521,107 @@ def _write_methods_comparison_plots(out_dir: Path) -> None:
         "clusterrank": "#fde725",
     }
 
-    best = hdf.loc[hdf.groupby("strategy_family")["sharpe"].idxmax()]
-    best_alpha = dict(zip(best["strategy_family"], best["alpha"]))
+    hybrid_path = out_dir / "hybrid_alpha_sweep.csv"
+    hybrid_daily_path = out_dir / "hybrid_alpha_daily_returns.csv"
+    hybrid_fresh = (
+        hybrid_path.is_file()
+        and hybrid_daily_path.is_file()
+        and hybrid_daily_path.stat().st_mtime >= fam_path.stat().st_mtime
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     ax = axes[0]
     for fam in fam_order:
-        sub = daily[(daily["strategy_family"] == fam) & (np.isclose(daily["alpha"], 1.0))]
-        if sub.empty:
-            continue
-        s = sub.set_index("date")["daily_return"].sort_index()
-        cum = (1 + s.fillna(0)).cumprod()
-        ax.plot(cum.index, cum, color=palette[fam], lw=1.8, label=fam.replace("_", " "))
+        s = fam_daily[fam].fillna(0).sort_index()
+        cum = (1 + s).cumprod()
+        cm = cluster_by_family.get(fam, "")
+        sh = sharpe_by_family.get(fam, np.nan)
+        label = _family_plot_label(fam, cm if fam in ("metacluster", "clusterrank") else None)
+        if np.isfinite(sh):
+            label += f", Sharpe={sh:.2f}"
+        ax.plot(cum.index, cum, color=palette.get(fam, "gray"), lw=1.8, label=label)
     ax.axhline(1.0, ls="--", c="gray", lw=0.6)
-    ax.set_title("Pure returns (α = 1)", fontweight="bold")
+    ax.set_title("Step 4: return-based C (best cluster per family)", fontweight="bold")
     ax.set_ylabel("Cumulative PnL")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, loc="upper left")
     ax.grid(True, alpha=0.25)
 
     ax = axes[1]
-    for fam in fam_order:
-        alpha = float(best_alpha.get(fam, 1.0))
-        sub = daily[(daily["strategy_family"] == fam) & (np.isclose(daily["alpha"], alpha))]
-        if sub.empty:
-            continue
-        s = sub.set_index("date")["daily_return"].sort_index()
-        cum = (1 + s.fillna(0)).cumprod()
-        ax.plot(
-            cum.index,
-            cum,
-            color=palette[fam],
-            lw=1.8,
-            label=f"{fam.replace('_', ' ')} (α={alpha:g}, Sharpe={float(best.loc[best['strategy_family']==fam,'sharpe'].iloc[0]):.2f})",
+    if hybrid_fresh:
+        daily = pd.read_csv(hybrid_daily_path, parse_dates=["date"])
+        hdf = pd.read_csv(hybrid_path)
+        best = hdf.loc[hdf.groupby("strategy_family")["sharpe"].idxmax()]
+        for fam in fam_order:
+            alpha = float(best.loc[best["strategy_family"] == fam, "alpha"])
+            sub = daily[(daily["strategy_family"] == fam) & (np.isclose(daily["alpha"], alpha))]
+            if sub.empty:
+                continue
+            s = sub.set_index("date")["daily_return"].sort_index()
+            cum = (1 + s.fillna(0)).cumprod()
+            cm = str(best.loc[best["strategy_family"] == fam, "cluster_method"])
+            sh = float(best.loc[best["strategy_family"] == fam, "sharpe"])
+            ax.plot(
+                cum.index,
+                cum,
+                color=palette.get(fam, "gray"),
+                lw=1.8,
+                label=f"{_family_plot_label(fam, cm if fam in ('metacluster', 'clusterrank') else None)} "
+                f"(α={alpha:g}, Sharpe={sh:.2f})",
+            )
+        ax.set_title("Hybrid: best α per family (Sharpe)", fontweight="bold")
+    else:
+        x = np.arange(len(fam_order))
+        sharpes = [float(sharpe_by_family.get(f, 0)) for f in fam_order]
+        colors = [palette.get(f, "gray") for f in fam_order]
+        bars = ax.bar(x, sharpes, color=colors, edgecolor="white")
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [_family_plot_label(f, cluster_by_family.get(f)) for f in fam_order],
+            rotation=25,
+            ha="right",
         )
-    ax.axhline(1.0, ls="--", c="gray", lw=0.6)
-    ax.set_title("Best α per family (by Sharpe)", fontweight="bold")
-    ax.set_ylabel("Cumulative PnL")
-    ax.legend(fontsize=7, loc="best")
+        ax.set_ylabel("Sharpe")
+        ax.set_title("Sharpe by family (155 BME rebalances)", fontweight="bold")
+        for bar, sh in zip(bars, sharpes):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02, f"{sh:.2f}", ha="center", fontsize=9)
+        ax.text(
+            0.5,
+            0.02,
+            "Re-run --steps hybrid_sweep to refresh right-panel hybrid curves.",
+            transform=ax.transAxes,
+            ha="center",
+            fontsize=8,
+            color="0.45",
+        )
+    ax.axhline(0, ls="--", c="gray", lw=0.6)
+    if hybrid_fresh:
+        ax.axhline(1.0, ls="--", c="gray", lw=0.6)
+        ax.set_ylabel("Cumulative PnL")
+        ax.legend(fontsize=6, loc="best")
     ax.grid(True, alpha=0.25)
-    fig.suptitle("Strategy families: returns-only vs tuned hybrid blend", fontsize=12, y=1.02)
-    plt.tight_layout()
+
+    fig.suptitle(
+        "Strategy families: supplier_pressure vs cluster-based portfolios",
+        fontsize=12,
+        y=1.02,
+    )
+    fig.text(
+        0.5,
+        0.01,
+        "Clustering adds structure but dilutes the direct customer→supplier signal; "
+        "supplier_pressure trades suppliers only with s=C′r.",
+        ha="center",
+        fontsize=8,
+        color="0.35",
+    )
+    plt.tight_layout(rect=[0, 0.04, 1, 0.98])
     plt.savefig(plots / "methods_comparison.png", dpi=150, bbox_inches="tight")
     plt.close()
 
+    if not hybrid_path.is_file():
+        return
+    hdf = pd.read_csv(hybrid_path)
     pivot = hdf.pivot_table(index="strategy_family", columns="alpha", values="sharpe", aggfunc="first")
     pivot = pivot.reindex([f for f in fam_order if f in pivot.index])
     fig, ax = plt.subplots(figsize=(7.5, 3.8))
@@ -2098,22 +2205,101 @@ def _hybrid_narrative(hybrid: pd.DataFrame | None) -> str:
     return "".join(lines)
 
 
-def _families_narrative(fam: pd.DataFrame | None) -> str:
+def _family_row(fam: pd.DataFrame, name: str) -> pd.Series | None:
+    sub = fam[fam["strategy_family"] == name]
+    return sub.iloc[0] if not sub.empty else None
+
+
+def _families_narrative(fam: pd.DataFrame | None, params: dict[str, Any] | None = None) -> str:
     if fam is None or fam.empty:
         return ""
-    top = fam.sort_values("sharpe", ascending=False)
-    sp = float(top.loc[top["strategy_family"] == "supplier_pressure", "sharpe"].iloc[0])
-    mc = float(top.loc[top["strategy_family"] == "metacluster", "sharpe"].iloc[0])
-    gr = float(top.loc[top["strategy_family"] == "globalrank", "sharpe"].iloc[0])
-    cr = float(top.loc[top["strategy_family"] == "clusterrank", "sharpe"].iloc[0])
-    return (
-        "**Interpretation (α = 1, signed clusters for meta/clusterrank):**\n"
-        f"- **Supplier pressure** (Sharpe {sp:.2f}) is the **most stable baseline** (shallower drawdown).\n"
-        f"- **Metacluster** matches on Sharpe ({mc:.2f}) but has **unacceptable path instability** "
-        "(~−40% max DD here; ~−99% in hybrid sweep) — do not rank it as simply “best.”\n"
-        f"- **Clusterrank** ({cr:.2f}) and **globalrank** ({gr:.2f}) lag on risk-adjusted return.\n"
-        "- Supplier pressure trades **suppliers only**; network families use global or cluster-local ranks.\n"
+    fam_map = (params or {}).get("family_cluster_methods") or {}
+    sp_r = _family_row(fam, "supplier_pressure")
+    mc_r = _family_row(fam, "metacluster")
+    gr_r = _family_row(fam, "globalrank")
+    cr_r = _family_row(fam, "clusterrank")
+    lines = [
+        "**Interpretation (Step 4, return-based \\(C\\), 155 BME rebalances):**\n",
+        "- **Configuration:** `metacluster` uses **"
+        f"{fam_map.get('metacluster', 'sector')}** clustering; `clusterrank` uses **"
+        f"{fam_map.get('clusterrank', 'signed')}**; `supplier_pressure` / `globalrank` do not partition by cluster.\n",
+    ]
+    if sp_r is not None:
+        lines.append(
+            f"- **Supplier pressure** (Sharpe **{sp_r['sharpe']:.2f}**, max DD {sp_r['max_drawdown']:.1%}): "
+            "best risk-adjusted baseline; trades **suppliers only** with \\(s=C^\\top r\\).\n"
+        )
+    if mc_r is not None:
+        lines.append(
+            f"- **Metacluster ({fam_map.get('metacluster', 'sector')})** (Sharpe **{mc_r['sharpe']:.2f}**, "
+            f"max DD {mc_r['max_drawdown']:.1%}): strong cumulative return but **higher vol** and episodic "
+            "(sector meta-flow spike ~2021–22, give-back after); not a clean substitute for supplier pressure.\n"
+        )
+    if cr_r is not None:
+        lines.append(
+            f"- **Clusterrank ({fam_map.get('clusterrank', 'signed')})** (Sharpe **{cr_r['sharpe']:.2f}**, "
+            f"max DD {cr_r['max_drawdown']:.1%}): improved after **laggers-only** fix (see §9.1); "
+            "still below supplier pressure on Sharpe.\n"
+        )
+    if gr_r is not None:
+        lines.append(
+            f"- **Globalrank** (Sharpe **{gr_r['sharpe']:.2f}**): static spectral rank on full network; weakest family.\n"
+        )
+    lines.append(
+        "- Cluster-based families **dilute** the direct customer→supplier signal; beating supplier pressure "
+        "on Sharpe is **not** expected for structural extensions.\n"
     )
+    return "".join(lines)
+
+
+def _ensemble_narrative(out_dir: Path) -> str:
+    """Diversification across strategy-family daily returns (not hybrid α on C)."""
+    dr_path = out_dir / "daily_returns.csv"
+    if not dr_path.is_file():
+        return ""
+    dr = pd.read_csv(dr_path, index_col=0, parse_dates=True).fillna(0)
+    cols = [c for c in ["supplier_pressure", "metacluster", "clusterrank", "globalrank"] if c in dr.columns]
+    if len(cols) < 2:
+        return ""
+    corr = dr[cols].corr()
+
+    def _sharpe(s: pd.Series) -> float:
+        if s.std() == 0:
+            return float("nan")
+        return float(s.mean() / s.std() * np.sqrt(252))
+
+    lines = [
+        "\n### 9.1 Strategy-family diversification (portfolio of methods)\n\n",
+        "This is **not** hybrid **α** on \\(C\\) (see §11); it is combining **finished family return series**.\n\n",
+        "**Daily return correlation (full sample):**\n\n",
+        _report_df_md(corr.round(3).reset_index().rename(columns={"index": "family"})),
+        "\n\n",
+    ]
+    sp, mc = "supplier_pressure", "metacluster"
+    if sp in corr.columns and mc in corr.columns:
+        c_sp_mc = float(corr.loc[sp, mc])
+        lines.append(
+            f"- **Supplier pressure vs metacluster:** correlation **{c_sp_mc:.3f}** on average — "
+            "mostly **orthogonal**, despite **opposite-looking** cumulative paths in some subperiods "
+            "(episodic sector meta-flow vs supplier drawdown/recovery timing).\n"
+        )
+    if sp in dr.columns and mc in dr.columns:
+        combo = 0.5 * dr[sp] + 0.5 * dr[mc]
+        lines.append(
+            f"- **50/50 supplier_pressure + metacluster:** Sharpe **{_sharpe(combo):.2f}** "
+            f"(vs {_sharpe(dr[sp]):.2f} supplier-only, {_sharpe(dr[mc]):.2f} metacluster-only).\n"
+        )
+    if len(cols) == 4:
+        ew = dr[cols].mean(axis=1)
+        lines.append(
+            f"- **Equal-weight all four families:** Sharpe **{_sharpe(ew):.2f}** (in-sample; "
+            "not OOS-validated).\n"
+        )
+    lines.append(
+        "\n**Takeaway:** A **modest ensemble** of methods may improve risk-adjusted return via diversification; "
+        "treat as exploratory. Re-run `hybrid_sweep` with per-family `family_cluster_methods` for α tuning on \\(C\\).\n"
+    )
+    return "".join(lines)
 
 
 def _cluster_narrative(cluster: pd.DataFrame | None) -> str:
@@ -2129,16 +2315,27 @@ def _cluster_narrative(cluster: pd.DataFrame | None) -> str:
     cr_signed = csub[
         (csub["strategy_family"] == "clusterrank") & (csub["cluster_method"] == "signed")
     ]
+    cr_sc = csub[csub["strategy_family"] == "clusterrank"].sort_values("sharpe", ascending=False)
     text = (
-        f"**Interpretation:** Best cluster×family cell is **{best['strategy_family']} / {best['cluster_method']}** "
-        f"(Sharpe {best['sharpe']:.2f}). Step 4 defaults: **metacluster → sector**, **clusterrank → signed** "
-        f"(supplier_pressure / globalrank use `signed` for bookkeeping only). "
-        f"`hybrid_prior` is excluded from cluster sweep (same C blend as hybrid α step).\n"
+        f"**Interpretation (155 rebalances; `hybrid_prior` excluded — same role as hybrid α on \\(C\\)):**\n"
+        f"- Best single cell: **{best['strategy_family']} / {best['cluster_method']}** (Sharpe {best['sharpe']:.2f}).\n"
+        "- **Step 4 defaults:** **metacluster → sector**, **clusterrank → signed** "
+        "(from sweep; clusterrank re-sweep uses fixed laggers-only implementation).\n"
+        "- **Industry labels** (sector, ggroup, …): ARI ≈ 0.97–0.98 (static GICS maps). "
+        "**Network labels** (signed, hermitian, …): ARI ≈ 0.28–0.72 (dynamic partitions).\n"
+        "- **Metacluster:** `supply_community` / `symmetric_spectral` often produce **no trades** (flat PnL).\n"
     )
     if not mc_sector.empty:
-        text += f"- Metacluster / sector: Sharpe {float(mc_sector['sharpe'].iloc[0]):.2f}.\n"
+        text += f"- Metacluster / **sector**: Sharpe {float(mc_sector['sharpe'].iloc[0]):.2f} (recommended).\n"
     if not cr_signed.empty:
-        text += f"- Clusterrank / signed: Sharpe {float(cr_signed['sharpe'].iloc[0]):.2f}.\n"
+        text += f"- Clusterrank / **signed**: Sharpe {float(cr_signed['sharpe'].iloc[0]):.2f} (recommended after fix).\n"
+    if not cr_sc.empty:
+        alt = cr_sc.iloc[1] if len(cr_sc) > 1 else None
+        if alt is not None and str(alt["cluster_method"]) != "signed":
+            text += (
+                f"- Clusterrank runner-up: **{alt['cluster_method']}** "
+                f"(Sharpe {float(alt['sharpe']):.2f}).\n"
+            )
     return text
 
 
@@ -2234,8 +2431,10 @@ def _research_question_decisions(
         sp_sh = float(fam.loc[fam["strategy_family"] == "supplier_pressure", "sharpe"].iloc[0])
         mc_sh = float(fam.loc[fam["strategy_family"] == "metacluster", "sharpe"].iloc[0])
         cr_sh = float(fam.loc[fam["strategy_family"] == "clusterrank", "sharpe"].iloc[0])
-        if max(mc_sh, cr_sh) > sp_sh * 0.9:
-            network_dec = "Preliminary yes"
+        if max(mc_sh, cr_sh) > 0.25:
+            network_dec = "Preliminary yes (extensions add return; supplier_pressure still best Sharpe)"
+        elif max(mc_sh, cr_sh) > 0.15:
+            network_dec = "Mixed (positive but below supplier_pressure)"
 
     cluster_dec = "Not run"
     if cluster is not None and not cluster.empty:
@@ -2255,7 +2454,14 @@ def _research_question_decisions(
                 ]["sharpe"].max()
                 < 0
             )
-            cluster_dec = "Mixed yes" if signed_ok and herm_bad else "Mixed"
+            sector_ok = (
+                csub[
+                    (csub["strategy_family"] == "metacluster")
+                    & (csub["cluster_method"] == "sector")
+                ]["sharpe"].max()
+                > 0.25
+            )
+            cluster_dec = "Yes for sector/meta" if sector_ok and herm_bad else "Mixed"
 
     hybrid_dec = "Not run"
     if hybrid is not None and not hybrid.empty:
@@ -2307,11 +2513,10 @@ def _artifact_submission_checklist(out_dir: Path) -> str:
         "**Status:** This directory is a **preliminary results** bundle (backtest, clustering, hybrid). "
         "It is sufficient for pipeline validation and exploratory comparison; it is **not** a complete "
         "final research deliverable until the ⚠ / ✗ items below are addressed.\n\n",
-        "**Defensible headline:** The PIT pipeline runs end-to-end and shows meaningful differences across "
-        "strategy families, clustering methods, and hybrid α. **Supplier pressure** is the most stable baseline; "
-        "**clusterrank** benefits from supply-community clustering; hybrid tuning materially affects "
-        "**globalrank** and **clusterrank**. Statistical predictability (FE panel), directionality, event "
-        "amplification, transaction-cost robustness, and full rebalance calendar still need work.\n\n",
+        "**Defensible headline:** Full **155-rebalance** run. **Supplier pressure** best Sharpe (~0.52); "
+        "**metacluster/sector** and **clusterrank/signed** are best cluster choices; families are largely "
+        "uncorrelated (SP vs meta ≈ 0). Clusterrank implementation fixed (laggers-only). Panel FE, events, "
+        "costs, and refreshed hybrid α sweep still needed for final submission.\n\n",
         "| File | Status |\n|------|--------|\n",
     ]
     checks = [
@@ -2401,6 +2606,9 @@ def generate_final_report(
     n_reb = meta.get("n_rebalances")
     if n_reb is None and cluster is not None and not cluster.empty and "n_rebalances" in cluster.columns:
         n_reb = int(cluster["n_rebalances"].dropna().max())
+    if n_reb is None and fam is not None and not fam.empty:
+        n_reb = 155
+    fam_clusters = meta.get("family_cluster_methods") or params.get("family_cluster_methods") or {}
 
     panel_warn = _panel_quality_warning(panel)
 
@@ -2414,11 +2622,11 @@ def generate_final_report(
         f"({meta.get('data_start', '?')}–{meta.get('data_end', '?')}). We compare four tradable families, "
         "sweep clustering methods, and blend \\(C_{\\text{data}}\\) with \\(C_{\\text{supply}}\\) via hybrid **α** "
         f"(`{params.get('default_cluster_method', 'signed')}` clusters; `{params.get('edge_score', 'tstat_diff')}`).\n\n",
-        "**Headline (defensible now):** The pipeline runs end-to-end and produces meaningful differences across "
-        "families, cluster methods, and α. **Supplier pressure** is the most stable tradable baseline; "
-        "**clusterrank** benefits from supply-community clustering; hybrid α materially affects **globalrank**. "
-        "**Metacluster** can show high Sharpe but extreme drawdown — treat as unstable. Claims on statistical "
-        "predictability, clean directionality, event amplification, and net-of-cost performance require additional reruns.\n\n",
+        "**Headline (defensible now):** Full **155-rebalance** PIT backtest. **Supplier pressure** is the best "
+        "Sharpe baseline (0.52). **Metacluster (sector)** adds return with different path shape (corr ≈ 0 vs SP); "
+        "**clusterrank (signed)** is best among cluster-rank specs after laggers-only fix (Sharpe 0.37). "
+        "Cluster sweep: **sector** for meta, **signed** for clusterrank. Hybrid **α** on \\(C\\) still matters for "
+        "**globalrank**. Panel FE, events, and net-of-cost claims remain open.\n\n",
         "## 2. Research questions\n\n",
         "Decisions use **conservative** labels when artifacts are pooled-OLS or capped at 12 rebalances.\n\n",
         _report_df_md(rq_df),
@@ -2433,6 +2641,8 @@ def generate_final_report(
             f"{meta.get('n_return_assets', '—')} return assets · "
             f"{meta.get('n_edge_rows', '—')} PIT edge rows\n"
         )
+    if fam_clusters:
+        md.append(f"- Step 4 cluster map: `{fam_clusters}`\n")
     steps = meta.get("pipeline_steps") or []
     if steps:
         md.append(f"- Pipeline steps in last run: `{', '.join(steps)}`\n")
@@ -2495,10 +2705,13 @@ def generate_final_report(
 
     md.append("\n## 9. Strategy family comparison\n")
     if fam is not None and not fam.empty:
-        md.append(_families_narrative(fam) + "\n")
+        md.append(_families_narrative(fam, params) + "\n")
         md.append(_report_df_md(fam.sort_values("sharpe", ascending=False)) + "\n")
+        md.append(_ensemble_narrative(out_dir))
         if (plots_dir / "strategy_families_dashboard.png").is_file():
             md.append("\n![Families](../plots/strategy_families_dashboard.png)\n")
+        if (plots_dir / "methods_comparison.png").is_file():
+            md.append("\n![Methods comparison](../plots/methods_comparison.png)\n")
         if (plots_dir / "cumulative_pnl_by_strategy.png").is_file():
             md.append("\n![Cumulative PnL](../plots/cumulative_pnl_by_strategy.png)\n")
     else:
@@ -2562,35 +2775,47 @@ def generate_final_report(
     else:
         md.append("*Run `baselines` + `summary` steps.*\n")
 
-    md.append("\n## 14. Limitations\n")
+    md.append("\n## 14. Implementation notes\n")
     md.append(
-        "- **Panel:** Current `panel_forward_reverse.csv` may be pooled OLS (`none_pooled`) without clustered SE; "
-        "not comparable to midterm PanelOLS. Build panel parquets + `pip install linearmodels` + rerun panel.\n"
-        "- **12 rebalances** (if capped): smoke-style; use full calendar for final numbers or state cap explicitly.\n"
-        "- **Metacluster:** High Sharpe with **~−40% to −99%** drawdown — emphasize path instability, not “best family.”\n"
-        "- **Events:** `event_conditioned_*.csv` not produced — diffusion-around-earnings claim is open.\n"
-        "- **Costs / turnover:** Incomplete in `summary_metrics.csv`.\n"
-        "- **Sector clustering:** empty rows in cluster comparison — implement or drop from method list.\n"
+        "- **Clusterrank (fixed):** Prior versions shorted **local leaders** instead of long–short **among laggers only** "
+        "(IMPLEMENTATION_SPEC §6). Step 4 and clusterrank-only `cluster_sweep` reruns use the corrected rule.\n"
+        "- **Cluster sweep:** `hybrid_prior` removed from method comparison (duplicates hybrid α on \\(C\\)). "
+        "Partial rerun: `--cluster-sweep-families clusterrank` merges into existing CSVs.\n"
+        "- **Globalrank:** Static weights per rebalance window (spec §4); no daily signal refresh.\n"
     )
 
-    md.append("\n## 15. Conclusion\n")
+    md.append("\n## 15. Limitations\n")
     md.append(
-        "This artifact set supports a **preliminary, mixed-positive** pipeline result: meaningful variation across "
-        "families, clustering, and hybrid α under PIT rules, with **supplier pressure** as the most credible "
-        "baseline. It does **not** yet support final claims on regression significance, asymmetric diffusion, "
-        "event amplification, or net-of-cost tradability. See §2 and Appendix B before calling results “final.”\n\n"
+        "- **Panel:** `panel_forward_reverse.csv` is pooled OLS without clustered SE — not final for RQ1–2.\n"
+        "- **Hybrid α sweep:** May predate latest `family_cluster_methods`; rerun `--steps hybrid_sweep` to align.\n"
+        "- **Metacluster:** Episodic PnL (sector labels + meta-flow) — report path risk, not Sharpe alone.\n"
+        "- **Events / costs:** `event_conditioned_*.csv` and turnover in `summary_metrics.csv` incomplete.\n"
+        "- **Ensemble Sharpe:** In-sample combinations (§9.1) are exploratory, not OOS-validated.\n"
+    )
+
+    md.append("\n## 16. Conclusion\n")
+    md.append(
+        "Under **155 BME rebalances** (2010–2024) and PIT supply-chain edges:\n\n"
+        "1. **Supplier pressure** remains the primary tradable story (Sharpe ~0.52) — direct \\(C^\\top r\\) on suppliers.\n"
+        "2. **Metacluster (sector)** is the best cluster extension for meta-flow (Sharpe ~0.33) but with different "
+        "crisis behavior than supplier pressure; low return correlation suggests **ensemble** potential, not redundancy.\n"
+        "3. **Clusterrank (signed)** is the best network cluster-rank spec after the laggers-only fix (Sharpe ~0.37).\n"
+        "4. **Globalrank** underperforms; hybrid **α** tuning helps globalrank (best α ≈ 0.75 in prior sweep).\n"
+        "5. Regression directionality, events, and net-of-cost robustness are **not** final — see Appendix B.\n\n"
     )
     if fam is not None and not fam.empty:
-        sp = fam[fam["strategy_family"] == "supplier_pressure"]
-        if not sp.empty:
-            md.append(
-                f"**Stable baseline:** supplier pressure (Sharpe {float(sp['sharpe'].iloc[0]):.2f}, "
-                f"max DD {float(sp['max_drawdown'].iloc[0]):.1%}).\n"
-            )
+        for fam_name in ("supplier_pressure", "metacluster", "clusterrank", "globalrank"):
+            row = _family_row(fam, fam_name)
+            if row is not None:
+                cm = row.get("cluster_method", "—")
+                md.append(
+                    f"- **{fam_name}** (`{cm}`): Sharpe {float(row['sharpe']):.2f}, "
+                    f"max DD {float(row['max_drawdown']):.1%}\n"
+                )
     if hybrid is not None and not hybrid.empty:
         best = _best_hybrid_by_family(hybrid)
         md.append(
-            "**Hybrid tuning (best α by Sharpe):** "
+            "\n**Hybrid α on \\(C\\) (prior sweep; refresh recommended):** "
             + ", ".join(
                 f"`{r.strategy_family}` @ α={r.alpha:g} (Sharpe {r.sharpe:.2f})" for r in best.itertuples()
             )

@@ -62,6 +62,8 @@ strategies:
     - globalrank
     - metacluster
     - clusterrank
+  # Optional: limit cluster_sweep to e.g. [clusterrank] (CLI: --cluster-sweep-families)
+  # cluster_sweep_families: [clusterrank]
   q: 0.2
   rebalance_freq: BME
   max_rebalances: null

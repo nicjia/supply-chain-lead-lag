@@ -46,20 +46,26 @@ def clusterrank_daily_weights(
                 continue
             sub = Cn.loc[members, members]
             ell = local_leadingness(sub)
-            k = max(1, int(len(members) * q))
-            leaders = ell.nlargest(k).index
-            laggers = ell.nsmallest(k).index
+            # Need ≥2 laggers for a long–short among laggers (spec §6); ceil so small clusters trade.
+            k = max(2, int(np.ceil(len(members) * q)))
+            if k * 2 > len(members):
+                continue
+            ranked = ell.sort_values()
+            laggers = ranked.index[:k]
+            leaders = ranked.index[-k:]
             sig = float(r_t.reindex(leaders).mean())
             if not np.isfinite(sig) or abs(sig) < 1e-15:
                 continue
-            # Trade laggers only: long most-lagging, short least-lagging (unit weights like supplier_pressure).
-            top_lag = ell.nsmallest(k).index
-            bot_lag = ell.nlargest(k).index
+            # Trade laggers only (IMPLEMENTATION_SPEC §6): long–short among laggers, not leaders.
+            lag_ell = ell.reindex(laggers)
+            k2 = max(1, len(laggers) // 2)
+            top_lag = lag_ell.nsmallest(k2).index
+            bot_lag = lag_ell.nlargest(k2).index
             sign = float(np.sign(sig))
             for ix in top_lag:
-                w.loc[ix] += sign / k
+                w.loc[ix] += sign / k2
             for ix in bot_lag:
-                w.loc[ix] -= sign / k
+                w.loc[ix] -= sign / k2
             for ix in laggers:
                 sc.loc[ix] = sig
             n_cl += 1

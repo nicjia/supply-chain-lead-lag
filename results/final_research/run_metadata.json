@@ -1,6 +1,6 @@
 {
-  "run_timestamp": "2026-05-25 21:42:36",
-  "git_commit": "94a3307c1ce2b22f441d2ee8f65792af1ee8b5d2",
+  "run_timestamp": "2026-05-25 23:23:07",
+  "git_commit": "a1deef529fe2f98c5ba81457ac942759cb81a8a0",
   "python_version": "3.11.12 (main, May 22 2025, 01:39:08) [Clang 20.1.4 ]",
   "data_start": "2010-01-04",
   "data_end": "2024-12-31",
@@ -11,12 +11,15 @@
   "n_rebalances": null,
   "pit_edge_date_col": "filing_date",
   "pipeline_steps": [
-    "cluster_sweep",
-    "load",
-    "report"
+    "families",
+    "load"
   ],
   "plot_profile": "full",
   "default_cluster_method": "signed",
+  "family_cluster_methods": {
+    "metacluster": "sector",
+    "clusterrank": "signed"
+  },
   "warnings": [],
   "quick": false
 }

@@ -89,16 +89,19 @@ def test_clusterrank_longs_laggers_not_leaders():
         C.iloc[i, i + 1] = 1.0
     labels = pd.Series({n: 0 for n in nodes})
     dates = pd.date_range("2020-01-01", periods=5, freq="B")
-  # leaders (high ell) move up on day 0
+    # leaders (high ell) move up on day 0
     R = pd.DataFrame(0.0, index=dates, columns=nodes)
     ell = local_leadingness(C.loc[nodes, nodes])
-    leaders = ell.nlargest(2).index
-    laggers = ell.nsmallest(2).index
+    k = max(2, int(np.ceil(len(nodes) * 0.25)))
+    ranked = ell.sort_values()
+    leaders = ranked.index[-k:]
+    laggers = ranked.index[:k]
     R.loc[dates[0], leaders] = 0.02
     w_df, _ = clusterrank_daily_weights(C, R, labels, q=0.25)
     w0 = w_df.loc[dates[0]]
-    assert w0.reindex(laggers).sum() > 0
-    assert w0.reindex(leaders).sum() < 0
+    top_lag = ell.reindex(laggers).nsmallest(max(1, len(laggers) // 2)).index
+    assert w0.reindex(top_lag).sum() > 0
+    assert w0.reindex(leaders).abs().max() < 1e-12
 
 
 def test_metacluster_clusterrank_use_unit_weight_scale():

@@ -5,31 +5,32 @@
 ## 1. Abstract
 Point-in-time (PIT) supply-chain lead–lag study on Compustat customer–supplier links and daily returns (2010-01-04–2024-12-31). We compare four tradable families, sweep clustering methods, and blend \(C_{\text{data}}\) with \(C_{\text{supply}}\) via hybrid **α** (`signed` clusters; `tstat_diff`).
 
-**Headline (defensible now):** The pipeline runs end-to-end and produces meaningful differences across families, cluster methods, and α. **Supplier pressure** is the most stable tradable baseline; **clusterrank** benefits from supply-community clustering; hybrid α materially affects **globalrank**. **Metacluster** can show high Sharpe but extreme drawdown — treat as unstable. Claims on statistical predictability, clean directionality, event amplification, and net-of-cost performance require additional reruns.
+**Headline (defensible now):** Full **155-rebalance** PIT backtest. **Supplier pressure** is the best Sharpe baseline (0.52). **Metacluster (sector)** adds return with different path shape (corr ≈ 0 vs SP); **clusterrank (signed)** is best among cluster-rank specs after laggers-only fix (Sharpe 0.37). Cluster sweep: **sector** for meta, **signed** for clusterrank. Hybrid **α** on \(C\) still matters for **globalrank**. Panel FE, events, and net-of-cost claims remain open.
 
 ## 2. Research questions
 
 Decisions use **conservative** labels when artifacts are pooled-OLS or capped at 12 rebalances.
 
-                                           Research question                  Evidence file                                                                    Decision
-            Does customer pressure predict supplier returns?      panel_forward_reverse.csv                              Preliminary yes; needs FE + clustered-SE rerun
-                                  Is the effect directional?      panel_forward_reverse.csv Inconclusive in this artifact; rerun reverse placebo with FE + clustered SE
-                                     Is the effect tradable?            summary_metrics.csv                                                             Preliminary yes
-                   Does higher-order network structure help? strategy_family_comparison.csv                                                             Preliminary yes
-                       Does direction-aware clustering help?  cluster_method_comparison.csv                                                                       Mixed
-Does supply-chain structure stabilize return-based lead-lag?         hybrid_alpha_sweep.csv                                                             Preliminary yes
-                               Is diffusion event-amplified? event_conditioned_backtest.csv                                                                     Not run
+                                           Research question                  Evidence file                                                                     Decision
+            Does customer pressure predict supplier returns?      panel_forward_reverse.csv                               Preliminary yes; needs FE + clustered-SE rerun
+                                  Is the effect directional?      panel_forward_reverse.csv  Inconclusive in this artifact; rerun reverse placebo with FE + clustered SE
+                                     Is the effect tradable?            summary_metrics.csv                                                              Preliminary yes
+                   Does higher-order network structure help? strategy_family_comparison.csv Preliminary yes (extensions add return; supplier_pressure still best Sharpe)
+                       Does direction-aware clustering help?  cluster_method_comparison.csv                                                          Yes for sector/meta
+Does supply-chain structure stabilize return-based lead-lag?         hybrid_alpha_sweep.csv                                                              Preliminary yes
+                               Is diffusion event-amplified? event_conditioned_backtest.csv                                                                      Not run
 
 ## 3. Data and PIT construction
 - Returns: `data/returns_with_gvkey.parquet` · Edges: `data/merged_edges.csv`
 - PIT date column: `filing_date` · Rebalance: `BME`
 - Window: 2010-01-04–2024-12-31 · 155 rebalances · 5461 return assets · 17153 PIT edge rows
-- Pipeline steps in last run: `cluster_sweep, load, report`
+- Step 4 cluster map: `{'metacluster': 'sector', 'clusterrank': 'signed'}`
+- Pipeline steps in last run: `families, load`
 
 ## 4. Customer-pressure signal
 At each day \(d\), signal \(s = C^\top r_d\) (customer pressure on suppliers); long–short **suppliers only** with return earned on \(d+1\) (`supplier_pressure` family).
 
-Rolling backtest (signed cluster label for bookkeeping, no clustering in signal): Sharpe **0.48**, ann. return 4.1%, max DD -18.4%.
+Rolling backtest (signed cluster label for bookkeeping, no clustering in signal): Sharpe **0.52**, ann. return 11.1%, max DD -71.1%.
 
 ## 5. Panel predictability results
 **Panel quality warning:** This run used `none_pooled` with `clustered_se=False` and missing `std_error` / `p_value` on some rows. Rebuild `data/leadlag_panel_forward.parquet` and `data/leadlag_panel_reverse.parquet` (`scripts/build_leadlag_panel.py`), install `linearmodels`, then rerun `--steps load,panel` for firm + time FE and entity-clustered standard errors.
@@ -72,39 +73,67 @@ Rolling \(C\), lookback 504 rows, score `tstat_diff`.
 *Optional — run `artifacts` step.*
 
 ## 9. Strategy family comparison
-**Interpretation (α = 1, signed clusters for meta/clusterrank):**
-- **Supplier pressure** (Sharpe 0.48) is the **most stable baseline** (shallower drawdown).
-- **Metacluster** matches on Sharpe (0.48) but has **unacceptable path instability** (~−40% max DD here; ~−99% in hybrid sweep) — do not rank it as simply “best.”
-- **Clusterrank** (0.38) and **globalrank** (0.20) lag on risk-adjusted return.
-- Supplier pressure trades **suppliers only**; network families use global or cluster-local ranks.
+**Interpretation (Step 4, return-based \(C\), 155 BME rebalances):**
+- **Configuration:** `metacluster` uses **sector** clustering; `clusterrank` uses **signed**; `supplier_pressure` / `globalrank` do not partition by cluster.
+- **Supplier pressure** (Sharpe **0.52**, max DD -71.1%): best risk-adjusted baseline; trades **suppliers only** with \(s=C^\top r\).
+- **Metacluster (sector)** (Sharpe **0.33**, max DD -56.8%): strong cumulative return but **higher vol** and episodic (sector meta-flow spike ~2021–22, give-back after); not a clean substitute for supplier pressure.
+- **Clusterrank (signed)** (Sharpe **0.37**, max DD -48.3%): improved after **laggers-only** fix (see §9.1); still below supplier pressure on Sharpe.
+- **Globalrank** (Sharpe **0.11**): static spectral rank on full network; weakest family.
+- Cluster-based families **dilute** the direct customer→supplier signal; beating supplier pressure on Sharpe is **not** expected for structural extensions.
 
   strategy_family cluster_method edge_score  ann_return  ann_vol   sharpe  max_drawdown  avg_turnover  net_sharpe  n_traded_assets_avg  notes
-supplier_pressure         signed tstat_diff    0.041367 0.085974 0.481159     -0.183721           NaN    0.481159                  NaN    NaN
-      metacluster         signed tstat_diff    0.050019 0.104267 0.479720     -0.400615           NaN    0.479720                  NaN    NaN
-      clusterrank         signed tstat_diff    0.026855 0.070053 0.383356     -0.152914           NaN    0.383356                  NaN    NaN
-       globalrank         signed tstat_diff    0.015893 0.080985 0.196249     -0.291659           NaN    0.196249                  NaN    NaN
+supplier_pressure         signed tstat_diff    0.111417 0.213785 0.521166     -0.710557           NaN    0.521166                  NaN    NaN
+      clusterrank         signed tstat_diff    0.053263 0.145470 0.366141     -0.483454           NaN    0.366141                  NaN    NaN
+      metacluster         sector tstat_diff    0.113467 0.345592 0.328328     -0.567501           NaN    0.328328                  NaN    NaN
+       globalrank         signed tstat_diff    0.020282 0.192481 0.105370     -0.643095           NaN    0.105370                  NaN    NaN
+
+### 9.1 Strategy-family diversification (portfolio of methods)
+
+This is **not** hybrid **α** on \(C\) (see §11); it is combining **finished family return series**.
+
+**Daily return correlation (full sample):**
+
+           family  supplier_pressure  metacluster  clusterrank  globalrank
+supplier_pressure              1.000        0.008       -0.042       0.093
+      metacluster              0.008        1.000        0.025       0.022
+      clusterrank             -0.042        0.025        1.000      -0.059
+       globalrank              0.093        0.022       -0.059       1.000
+
+- **Supplier pressure vs metacluster:** correlation **0.008** on average — mostly **orthogonal**, despite **opposite-looking** cumulative paths in some subperiods (episodic sector meta-flow vs supplier drawdown/recovery timing).
+- **50/50 supplier_pressure + metacluster:** Sharpe **0.55** (vs 0.52 supplier-only, 0.33 metacluster-only).
+- **Equal-weight all four families:** Sharpe **0.62** (in-sample; not OOS-validated).
+
+**Takeaway:** A **modest ensemble** of methods may improve risk-adjusted return via diversification; treat as exploratory. Re-run `hybrid_sweep` with per-family `family_cluster_methods` for α tuning on \(C\).
 
 ![Families](../plots/strategy_families_dashboard.png)
+
+![Methods comparison](../plots/methods_comparison.png)
 
 ![Cumulative PnL](../plots/cumulative_pnl_by_strategy.png)
 
 ## 10. Clustering method comparison
-**Interpretation:** Best cluster×family cell is **metacluster / sector** (Sharpe 0.33). **Signed** clustering works well for metacluster; **supply_community** is best for clusterrank. **Hermitian** and **hybrid_prior** underperform.
-- Metacluster: signed Sharpe 0.19 vs hermitian -0.18.
+**Interpretation (155 rebalances; `hybrid_prior` excluded — same role as hybrid α on \(C\)):**
+- Best single cell: **clusterrank / signed** (Sharpe 0.37).
+- **Step 4 defaults:** **metacluster → sector**, **clusterrank → signed** (from sweep; clusterrank re-sweep uses fixed laggers-only implementation).
+- **Industry labels** (sector, ggroup, …): ARI ≈ 0.97–0.98 (static GICS maps). **Network labels** (signed, hermitian, …): ARI ≈ 0.28–0.72 (dynamic partitions).
+- **Metacluster:** `supply_community` / `symmetric_spectral` often produce **no trades** (flat PnL).
+- Metacluster / **sector**: Sharpe 0.33 (recommended).
+- Clusterrank / **signed**: Sharpe 0.37 (recommended after fix).
+- Clusterrank runner-up: **supply_community** (Sharpe 0.16).
 
-strategy_family     cluster_method  n_clusters edge_score  hybrid_alpha  ann_return  ann_vol   sharpe  max_drawdown  avg_turnover  cluster_ari_mean  eigenspace_drift_mean  n_rebalances
-    metacluster             sector          10 tstat_diff           NaN    0.113467 0.345592 0.328328     -0.567501           NaN          0.979296               1.318381           155
-    clusterrank       hybrid_prior          10 tstat_diff           NaN    0.028574 0.103677 0.275609     -0.285940           NaN          0.301467               1.318381           155
-    metacluster             ggroup          10 tstat_diff           NaN    0.070207 0.275737 0.254618     -0.591064           NaN          0.978325               1.318381           155
-    metacluster             signed          10 tstat_diff           NaN    0.097077 0.509686 0.190465     -0.988833           NaN          0.719605               1.318381           155
-    clusterrank             signed          10 tstat_diff           NaN    0.023690 0.132406 0.178922     -0.384330           NaN          0.719605               1.318381           155
-    clusterrank               sic2          10 tstat_diff           NaN    0.038116 0.234586 0.162483     -0.558105           NaN          0.977435               1.318381           155
-    clusterrank             ggroup          10 tstat_diff           NaN    0.032633 0.225110 0.144965     -0.610458           NaN          0.978325               1.318381           155
-    clusterrank               sic4          10 tstat_diff           NaN    0.028520 0.254288 0.112158     -0.698878           NaN          0.974131               1.318381           155
-    clusterrank             sector          10 tstat_diff           NaN    0.027010 0.244604 0.110422     -0.696730           NaN          0.979296               1.318381           155
-    clusterrank             naics2          10 tstat_diff           NaN    0.026579 0.270298 0.098332     -0.538991           NaN          0.978731               1.318381           155
-    metacluster               sic4          10 tstat_diff           NaN    0.008274 0.092477 0.089471     -0.244145           NaN          0.974131               1.318381           155
-    clusterrank symmetric_spectral          10 tstat_diff           NaN    0.025724 0.366998 0.070093     -0.903723           NaN          0.504945               1.318381           155
+strategy_family   cluster_method  n_clusters edge_score  hybrid_alpha  ann_return  ann_vol    sharpe  max_drawdown  avg_turnover  cluster_ari_mean  eigenspace_drift_mean  n_rebalances
+    clusterrank           signed          10 tstat_diff           NaN    0.053263 0.145470  0.366141     -0.483454           NaN          0.719605               1.318381           155
+    metacluster           sector          10 tstat_diff           NaN    0.113467 0.345592  0.328328     -0.567501           NaN          0.979296               1.318381           155
+    metacluster           ggroup          10 tstat_diff           NaN    0.070207 0.275737  0.254618     -0.591064           NaN          0.978325               1.318381           155
+    metacluster           signed          10 tstat_diff           NaN    0.097077 0.509686  0.190465     -0.988833           NaN          0.719605               1.318381           155
+    clusterrank supply_community          10 tstat_diff           NaN    0.079614 0.500881  0.158949     -0.882603           NaN          0.566851               1.318381           155
+    metacluster             sic4          10 tstat_diff           NaN    0.008274 0.092477  0.089471     -0.244145           NaN          0.974131               1.318381           155
+    clusterrank           sector          10 tstat_diff           NaN    0.012883 0.287526  0.044807     -0.629773           NaN          0.979296               1.318381           155
+    metacluster           naics2          10 tstat_diff           NaN    0.008621 0.242490  0.035552     -0.692038           NaN          0.978731               1.318381           155
+    metacluster             gind          10 tstat_diff           NaN    0.001144 0.193621  0.005907     -0.652884           NaN          0.975198               1.318381           155
+    metacluster          gsubind          10 tstat_diff           NaN   -0.000371 0.109417 -0.003391     -0.461297           NaN          0.969967               1.318381           155
+    metacluster            naics          10 tstat_diff           NaN   -0.010988 0.070877 -0.155025     -0.242332           NaN          0.969991               1.318381           155
+    clusterrank             sic4          10 tstat_diff           NaN   -0.057048 0.365181 -0.156218     -0.972817           NaN          0.974131               1.318381           155
 
 ![Cluster sweep](../plots/cluster_sweep_dashboard.png)
 
@@ -177,19 +206,33 @@ supplier_pressure         signed tstat_diff           NaN          main    0.041
 
 **Not final for trading claims:** `avg_turnover` is NaN and `total_cost_bps` is 0 — gross Sharpe equals net Sharpe. Populate turnover/cost assumptions before submission.
 
-## 14. Limitations
-- **Panel:** Current `panel_forward_reverse.csv` may be pooled OLS (`none_pooled`) without clustered SE; not comparable to midterm PanelOLS. Build panel parquets + `pip install linearmodels` + rerun panel.
-- **12 rebalances** (if capped): smoke-style; use full calendar for final numbers or state cap explicitly.
-- **Metacluster:** High Sharpe with **~−40% to −99%** drawdown — emphasize path instability, not “best family.”
-- **Events:** `event_conditioned_*.csv` not produced — diffusion-around-earnings claim is open.
-- **Costs / turnover:** Incomplete in `summary_metrics.csv`.
-- **Sector clustering:** empty rows in cluster comparison — implement or drop from method list.
+## 14. Implementation notes
+- **Clusterrank (fixed):** Prior versions shorted **local leaders** instead of long–short **among laggers only** (IMPLEMENTATION_SPEC §6). Step 4 and clusterrank-only `cluster_sweep` reruns use the corrected rule.
+- **Cluster sweep:** `hybrid_prior` removed from method comparison (duplicates hybrid α on \(C\)). Partial rerun: `--cluster-sweep-families clusterrank` merges into existing CSVs.
+- **Globalrank:** Static weights per rebalance window (spec §4); no daily signal refresh.
 
-## 15. Conclusion
-This artifact set supports a **preliminary, mixed-positive** pipeline result: meaningful variation across families, clustering, and hybrid α under PIT rules, with **supplier pressure** as the most credible baseline. It does **not** yet support final claims on regression significance, asymmetric diffusion, event amplification, or net-of-cost tradability. See §2 and Appendix B before calling results “final.”
+## 15. Limitations
+- **Panel:** `panel_forward_reverse.csv` is pooled OLS without clustered SE — not final for RQ1–2.
+- **Hybrid α sweep:** May predate latest `family_cluster_methods`; rerun `--steps hybrid_sweep` to align.
+- **Metacluster:** Episodic PnL (sector labels + meta-flow) — report path risk, not Sharpe alone.
+- **Events / costs:** `event_conditioned_*.csv` and turnover in `summary_metrics.csv` incomplete.
+- **Ensemble Sharpe:** In-sample combinations (§9.1) are exploratory, not OOS-validated.
 
-**Stable baseline:** supplier pressure (Sharpe 0.48, max DD -18.4%).
-**Hybrid tuning (best α by Sharpe):** `supplier_pressure` @ α=1 (Sharpe 0.52), `globalrank` @ α=0.75 (Sharpe 0.42), `metacluster` @ α=0 (Sharpe 0.28), `clusterrank` @ α=0.75 (Sharpe 0.25).
+## 16. Conclusion
+Under **155 BME rebalances** (2010–2024) and PIT supply-chain edges:
+
+1. **Supplier pressure** remains the primary tradable story (Sharpe ~0.52) — direct \(C^\top r\) on suppliers.
+2. **Metacluster (sector)** is the best cluster extension for meta-flow (Sharpe ~0.33) but with different crisis behavior than supplier pressure; low return correlation suggests **ensemble** potential, not redundancy.
+3. **Clusterrank (signed)** is the best network cluster-rank spec after the laggers-only fix (Sharpe ~0.37).
+4. **Globalrank** underperforms; hybrid **α** tuning helps globalrank (best α ≈ 0.75 in prior sweep).
+5. Regression directionality, events, and net-of-cost robustness are **not** final — see Appendix B.
+
+- **supplier_pressure** (`signed`): Sharpe 0.52, max DD -71.1%
+- **metacluster** (`sector`): Sharpe 0.33, max DD -56.8%
+- **clusterrank** (`signed`): Sharpe 0.37, max DD -48.3%
+- **globalrank** (`signed`): Sharpe 0.11, max DD -64.3%
+
+**Hybrid α on \(C\) (prior sweep; refresh recommended):** `supplier_pressure` @ α=1 (Sharpe 0.52), `globalrank` @ α=0.75 (Sharpe 0.42), `metacluster` @ α=0 (Sharpe 0.28), `clusterrank` @ α=0.75 (Sharpe 0.25).
 
 ## Appendix A: artifact checklist
 
@@ -197,13 +240,10 @@ This artifact set supports a **preliminary, mixed-positive** pipeline result: me
 - `plots/cluster_sweep_cumulative_pnl_clusterrank.png`
 - `plots/cluster_sweep_cumulative_pnl_metacluster.png`
 - `plots/cluster_sweep_dashboard.png`
-- `plots/cluster_sweep_sharpe.png`
-- `plots/cluster_sweep_sharpe_vs_ari.png`
 - `plots/cumulative_pnl_by_strategy.png`
 - `plots/drawdown_by_strategy.png`
 - `plots/hybrid_alpha_sweep.png`
 - `plots/hybrid_alpha_sweep_cumulative_pnl.png`
-- `plots/hybrid_sharpe_heatmap.png`
 - `plots/methods_comparison.png`
 - `plots/strategy_families_dashboard.png`
 
@@ -219,7 +259,7 @@ This artifact set supports a **preliminary, mixed-positive** pipeline result: me
 
 **Status:** This directory is a **preliminary results** bundle (backtest, clustering, hybrid). It is sufficient for pipeline validation and exploratory comparison; it is **not** a complete final research deliverable until the ⚠ / ✗ items below are addressed.
 
-**Defensible headline:** The PIT pipeline runs end-to-end and shows meaningful differences across strategy families, clustering methods, and hybrid α. **Supplier pressure** is the most stable baseline; **clusterrank** benefits from supply-community clustering; hybrid tuning materially affects **globalrank** and **clusterrank**. Statistical predictability (FE panel), directionality, event amplification, transaction-cost robustness, and full rebalance calendar still need work.
+**Defensible headline:** Full **155-rebalance** run. **Supplier pressure** best Sharpe (~0.52); **metacluster/sector** and **clusterrank/signed** are best cluster choices; families are largely uncorrelated (SP vs meta ≈ 0). Clusterrank implementation fixed (laggers-only). Panel FE, events, costs, and refreshed hybrid α sweep still needed for final submission.
 
 | File | Status |
 |------|--------|

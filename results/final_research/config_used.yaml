@@ -1,5 +1,3 @@
-# Final research pipeline defaults (override via CLI on run_final_research_pipeline.py)
-
 paths:
   edges_csv: data/merged_edges.csv
   returns_parquet: data/returns_with_gvkey.parquet
@@ -8,12 +6,10 @@ paths:
   firm_classification_map_csv: data/firm_classification_map.csv
   wrds_classification_csv: data/wrds_classification.csv
   output_dir: results/final_research
-
 pit:
   edge_date_col: filing_date
   edge_expiry_days: 550
   prefer_filing_date: true
-
 matrix:
   lookback_rows: 504
   horizon: 1
@@ -22,83 +18,80 @@ matrix:
   winsor_q: 0.001
   edge_score: tstat_diff
   edge_scores:
-    - tstat_diff
-    - beta_diff
-    - cross_corr
-    - regression_r2
-    - granger
-    - levy
-  hybrid_alpha_grid: [0.0, 0.25, 0.5, 0.75, 1.0]
-
+  - tstat_diff
+  - beta_diff
+  - cross_corr
+  - regression_r2
+  - granger
+  - levy
+  hybrid_alpha_grid:
+  - 0.0
+  - 0.25
+  - 0.5
+  - 0.75
+  - 1.0
 clustering:
   n_clusters: 10
   random_state: 42
-  # Bookkeeping for supplier_pressure / globalrank (no cluster partition in signal).
   default_cluster_method: signed
-  # Step 4 families: per-family winners from 155-rebalance cluster_sweep (May 2025).
   family_cluster_methods:
     metacluster: sector
     clusterrank: signed
   methods:
-    - sector          # GICS gsector (~11)
-    - ggroup          # GICS industry group (~27)
-    - gind            # GICS industry (~81)
-    - gsubind         # GICS sub-industry (~189)
-    - naics2          # NAICS 2-digit
-    - naics           # NAICS 6-digit
-    - sic2            # SIC 2-digit
-    - sic4            # SIC 4-digit
-    - supply_community
-    - symmetric_spectral
-    - hermitian
-    - signed
-  # hybrid_prior: C_data + C_supply blend then cluster — use hybrid_sweep (α grid), not cluster_sweep.
-
+  - sector
+  - ggroup
+  - gind
+  - gsubind
+  - naics2
+  - naics
+  - sic2
+  - sic4
+  - supply_community
+  - symmetric_spectral
+  - hermitian
+  - signed
 strategies:
   families:
-    - supplier_pressure
-    - globalrank
-    - metacluster
-    - clusterrank
+  - supplier_pressure
+  - globalrank
+  - metacluster
+  - clusterrank
   q: 0.2
   rebalance_freq: BME
   max_rebalances: null
   apply_next_day: true
   globalrank_method: spectral
-
 baselines:
   include: true
   methods:
-    - random
-    - momentum
-    - structural
-    - equal_weight
+  - random
+  - momentum
+  - structural
+  - equal_weight
   momentum_window: 20
-
 costs:
   commission_bps: 0.0
   slippage_bps: 0.0
   borrow_bps_annual: 0.0
-
 risk:
   max_abs_weight: null
   beta_neutralize: false
   market_gvkey: null
   beta_lookback_rows: 252
   sector_neutralize: false
-
 events:
   enabled: true
-  earnings_window_days: [-1, 0, 1]
+  earnings_window_days:
+  - -1
+  - 0
+  - 1
   large_customer_return_quantile: 0.95
-  high_vol_quantile: 0.80
-
+  high_vol_quantile: 0.8
 report:
   generate_md: true
   generate_tex: true
   generate_pdf: false
   plot_profile: full
-
 panel:
   horizon_max: 5
   build_if_missing: true

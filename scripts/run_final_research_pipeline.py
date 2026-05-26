@@ -39,6 +39,10 @@ Examples:
 
   # Full run but skip panel validation
   python scripts/run_final_research_pipeline.py --skip-steps panel,baselines,events,artifacts
+
+  # Re-run cluster sweep for clusterrank only (merges into existing CSVs/plots)
+  python scripts/run_final_research_pipeline.py --steps load,cluster_sweep,report \\
+    --cluster-sweep-families clusterrank
 """,
     )
     ap.add_argument("--config", default=str(_ROOT / "config" / "research.yaml"))
@@ -81,6 +85,11 @@ Examples:
         default=None,
         help="minimal = dashboard + cumulative PnL only; full = all diagnostic plots",
     )
+    ap.add_argument(
+        "--cluster-sweep-families",
+        default=None,
+        help="Subset for cluster_sweep only, e.g. clusterrank (merges into existing sweep files)",
+    )
     args = ap.parse_args()
 
     out = run_final_research_pipeline(
@@ -94,6 +103,7 @@ Examples:
         steps=args.steps,
         skip_steps=args.skip_steps,
         plot_profile=args.plot_profile,
+        cluster_sweep_families=args.cluster_sweep_families,
     )
     print(f"Wrote results to {out}")
     print(f"Start with: {out / 'START_HERE.md'}")
