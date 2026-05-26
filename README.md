@@ -115,16 +115,22 @@ Regenerate reports from disk:
 uv run --extra dev python scripts/make_final_report.py --results-dir results/final_research
 ```
 
-### What Step 4 uses (initial 4-family comparison)
+### What Step 4 uses (4-family comparison)
 
 | Family | Clustering? | Method |
 |--------|-------------|--------|
 | `supplier_pressure` | No | Daily \(s_d = C^\top r_d\) on suppliers |
-| `globalrank` | No | **`spectral`** GlobalRank (config: `strategies.globalrank_method`) |
-| `metacluster` | Yes | **`hermitian`** (config: `clustering.default_cluster_method`, 10 clusters) |
-| `clusterrank` | Yes | Same as metacluster |
+| `globalrank` | No | **`spectral`** GlobalRank (`strategies.globalrank_method`) |
+| `metacluster` | Yes | **`sector`** (GICS; sweep-best Sharpe — `clustering.family_cluster_methods`) |
+| `clusterrank` | Yes | **`signed`** (sweep-best Sharpe among network clusters) |
 
-All four share the same return-based \(C_{\text{data}}\) at each rebalance (no hybrid α in Step 4). Step 5 varies clustering for metacluster/clusterrank only; Step 6 blends \(C_{\text{data}}\) and \(C_{\text{supply}}\).
+All four share return-based \(C_{\text{data}}\) at each rebalance (no hybrid α in Step 4). **`cluster_sweep`** compares methods; **`hybrid_sweep`** varies α on \(C\).
+
+Re-run full 155-rebalance family comparison after updating clusters:
+
+```bash
+uv run python scripts/run_final_research_pipeline.py --steps load,families
+```
 
 **Strategy families:** `supplier_pressure`, `globalrank`, `metacluster`, `clusterrank`
 

@@ -33,9 +33,14 @@ matrix:
 clustering:
   n_clusters: 10
   random_state: 42
-  # Used for metacluster + clusterrank in Step 4 (globalrank/supplier_pressure ignore this).
-  # Cluster sweep: signed best for metacluster; hermitian had negative Sharpe / weak meta-flow.
+  # Bookkeeping for supplier_pressure / globalrank (no cluster partition in signal).
   default_cluster_method: signed
+  # Step 4 (families): best Sharpe per family from cluster_sweep @ 155 BME rebalances.
+  #   metacluster → sector (Sharpe 0.33)   clusterrank → signed (Sharpe 0.18)
+  # supplier_pressure / globalrank ignore these (bookkeeping uses default_cluster_method).
+  family_cluster_methods:
+    metacluster: sector
+    clusterrank: signed
   methods:
     - sector          # GICS gsector (~11)
     - ggroup          # GICS industry group (~27)
@@ -49,8 +54,7 @@ clustering:
     - symmetric_spectral
     - hermitian
     - signed
-    - hybrid_prior
-  hybrid_prior_alpha: 0.5
+  # hybrid_prior: C_data + C_supply blend then cluster — use hybrid_sweep (α grid), not cluster_sweep.
 
 strategies:
   families:

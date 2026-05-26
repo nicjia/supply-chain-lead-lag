@@ -42,7 +42,6 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "symmetric_spectral",
         "hermitian",
         "signed",
-        "hybrid_prior",
     ])
     pipeline = cfg.get("pipeline", {})
     if isinstance(cl_methods, str):
@@ -84,6 +83,7 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "cluster_random_state": int(cl.get("random_state", 42)),
         "cluster_methods": list(cl_methods),
         "default_cluster_method": cl.get("default_cluster_method", "hermitian"),
+        "family_cluster_methods": dict(cl.get("family_cluster_methods") or {}),
         "hybrid_prior_alpha": float(cl.get("hybrid_prior_alpha", 0.5)),
         "pipeline_steps": pipeline.get("steps"),
         "plot_profile": report.get("plot_profile", "full"),

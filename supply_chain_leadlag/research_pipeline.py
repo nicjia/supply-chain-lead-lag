@@ -24,6 +24,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Not a pure clustering baseline: blends C_data and C_supply (same idea as hybrid α sweep).
+CLUSTER_SWEEP_EXCLUDE_METHODS: frozenset[str] = frozenset({"hybrid_prior"})
+
 from supply_chain_leadlag.backtest import (
     comparison_metrics_table,
     filter_edges_pit,
@@ -49,6 +52,58 @@ from supply_chain_leadlag.research_outputs import (
 )
 from supply_chain_leadlag.strategy_families import run_strategy_family
 from supply_chain_leadlag.yaml_config import load_yaml_config
+
+
+def _exclude_cluster_sweep_methods(methods: list[str]) -> list[str]:
+    """Drop methods that belong in hybrid_sweep, not cluster_method comparison."""
+    return [m for m in methods if m not in CLUSTER_SWEEP_EXCLUDE_METHODS]
+
+
+def _filter_cluster_sweep_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "cluster_method" not in df.columns:
+        return df
+    return df[~df["cluster_method"].isin(CLUSTER_SWEEP_EXCLUDE_METHODS)].copy()
+
+
+def _mark_dashboard_best_star(
+    ax: Any,
+    *,
+    method_order: list[str],
+    sub: pd.DataFrame,
+    metric: str,
+    y_scale: float = 1.0,
+) -> None:
+    """Gold star at the best (max) value of ``metric`` for one family panel series."""
+    if metric not in sub.columns:
+        return
+    valid = sub[metric].dropna()
+    if valid.empty:
+        return
+    cm_best = valid.idxmax()
+    if cm_best not in method_order:
+        return
+    xi = method_order.index(cm_best)
+    yi = float(valid.loc[cm_best]) * y_scale
+    if not np.isfinite(yi):
+        return
+    ax.scatter(
+        [xi],
+        [yi],
+        s=280,
+        marker="*",
+        c="gold",
+        edgecolors="black",
+        linewidths=0.6,
+        zorder=6,
+    )
+
+
+def cluster_method_for_family(family: str, params: dict[str, Any]) -> str:
+    """Cluster label method for a strategy family (sweep winners override default)."""
+    fam_map = params.get("family_cluster_methods") or {}
+    if family in fam_map:
+        return str(fam_map[family])
+    return str(params.get("default_cluster_method", "signed"))
 
 
 def configure_pipeline_logging(*, verbose: bool = False, level: str | None = None) -> None:
@@ -287,6 +342,8 @@ def _accumulate_family_returns(
     quick: bool = False,
     collect_cluster_labels: bool = True,
     log_prefix: str = "",
+    show_progress: bool = False,
+    progress_desc: str | None = None,
 ) -> tuple[pd.Series, list[dict], dict, list[dict], list[tuple[pd.Timestamp, pd.Series]]]:
     """Rolling PIT loop for one (family, cluster_method, alpha)."""
     tag = log_prefix or (
@@ -314,7 +371,20 @@ def _accumulate_family_returns(
     cluster_label_records: list[dict] = []
     weight_events: list[tuple[pd.Timestamp, pd.Series]] = []
 
-    for i, T in enumerate(rebalances):
+    rebalance_iter: Any = rebalances
+    if show_progress:
+        from tqdm.auto import tqdm
+
+        desc = progress_desc or tag
+        rebalance_iter = tqdm(
+            rebalances,
+            desc=desc,
+            leave=False,
+            unit="reb",
+            total=n_reb_planned,
+        )
+
+    for i, T in enumerate(rebalance_iter):
         T = pd.Timestamp(T)
         logger.debug(
             "  rebalance %d/%d @ %s (%s)",
@@ -388,7 +458,15 @@ def _accumulate_family_returns(
             last_labels = labels
             last_C = C.copy()
 
-        next_T = pd.Timestamp(rebalances[i + 1]) if i + 1 < len(rebalances) else end
+        if i + 1 < len(rebalances):
+            next_T = pd.Timestamp(rebalances[i + 1])
+        elif max_rebalances is not None:
+            # Capped runs: do not extend the final rebalance through sample end (would
+            # reuse one C/labels for 10+ years and distort cumulative-PnL plots).
+            cal = pd.bdate_range(T + pd.Timedelta(days=1), end, freq=params["rebalance_freq"])
+            next_T = pd.Timestamp(cal[0]) if len(cal) else end
+        else:
+            next_T = end
         R_fwd = R.loc[(R.index > T) & (R.index <= next_T)]
         if R_fwd.empty:
             continue
@@ -500,6 +578,64 @@ def resolve_pipeline_steps(
     return enabled
 
 
+def _family_plot_label(family: str, cluster_method: str | None) -> str:
+    if family in ("metacluster", "clusterrank") and cluster_method:
+        return f"{family} ({cluster_method})"
+    return family
+
+
+def _write_strategy_families_dashboard(
+    out_dir: Path,
+    all_daily: dict[str, pd.Series],
+    family_rows: list[dict] | None = None,
+) -> None:
+    """Cumulative PnL + Sharpe bar chart for the four strategy families."""
+    if not all_daily:
+        return
+    plots = out_dir / "plots"
+    plots.mkdir(parents=True, exist_ok=True)
+    cluster_by_family: dict[str, str] = {}
+    sharpe_by_family: dict[str, float] = {}
+    if family_rows:
+        for row in family_rows:
+            fam = str(row.get("strategy_family", ""))
+            if fam:
+                cluster_by_family[fam] = str(row.get("cluster_method", ""))
+                sh = row.get("sharpe")
+                if sh is not None and not (isinstance(sh, float) and np.isnan(sh)):
+                    sharpe_by_family[fam] = float(sh)
+
+    cum = pd.DataFrame({k: (1 + v.fillna(0)).cumprod() for k, v in all_daily.items()})
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for col in cum.columns:
+        axes[0].plot(
+            cum.index,
+            cum[col],
+            label=_family_plot_label(col, cluster_by_family.get(col)),
+        )
+    axes[0].set_title("Cumulative PnL by strategy family")
+    axes[0].set_ylabel("Cumulative PnL")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(True, alpha=0.25)
+
+    if sharpe_by_family:
+        fam_order = [f for f in cum.columns if f in sharpe_by_family]
+        axes[1].bar(
+            fam_order,
+            [sharpe_by_family[f] for f in fam_order],
+            color=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"][: len(fam_order)],
+        )
+    elif family_rows:
+        df = pd.DataFrame(family_rows)
+        axes[1].bar(df["strategy_family"], df["sharpe"].fillna(0))
+    axes[1].set_title("Sharpe by strategy family")
+    axes[1].tick_params(axis="x", rotation=30)
+    axes[1].grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(plots / "strategy_families_dashboard.png", dpi=150)
+    plt.close()
+
+
 def _write_family_core_outputs(out_dir: Path, all_daily: dict[str, pd.Series]) -> None:
     """Primary tradable outputs for the four strategy families."""
     if not all_daily:
@@ -518,6 +654,7 @@ def run_final_research_pipeline(
     quick: bool = False,
     repo_root: Path | None = None,
     verbose: bool = False,
+    show_progress: bool | None = None,
     only: str | None = None,
     steps: str | None = None,
     skip_steps: str | None = None,
@@ -573,6 +710,8 @@ def run_final_research_pipeline(
         skip_steps=skip_steps,
         config_steps=params.get("pipeline_steps"),
     )
+    if show_progress is None:
+        show_progress = ("cluster_sweep" in enabled or "families" in enabled) and not quick
     profile = (plot_profile or params.get("plot_profile") or "full").lower()
     if profile not in ("minimal", "full"):
         raise ValueError(f"plot_profile must be 'minimal' or 'full', got {profile!r}")
@@ -721,30 +860,44 @@ def run_final_research_pipeline(
     if "families" in enabled:
         assert R is not None and edges is not None
         step_n += 1
+        fam_clusters = {
+            f: cluster_method_for_family(f, params) for f in params["strategy_families"]
+        }
         logger.info(
-            "Step %d/%d: strategy family comparison (%d families, cluster=%s)",
+            "Step %d/%d: strategy family comparison (%d families, clusters=%s)",
             step_n,
             total_steps,
             len(params["strategy_families"]),
-            default_cluster,
+            fam_clusters,
         )
-        for fi, family in enumerate(params["strategy_families"], start=1):
-            logger.info(
-                "  family %d/%d: %s",
-                fi,
-                len(params["strategy_families"]),
-                family,
-            )
+        fam_iter: Any = list(params["strategy_families"])
+        if show_progress and not quick:
+            from tqdm.auto import tqdm
+
+            fam_iter = tqdm(fam_iter, desc="strategy families", unit="family")
+        for fi, family in enumerate(fam_iter, start=1):
+            cm_fam = cluster_method_for_family(family, params)
+            if not show_progress or quick:
+                logger.info(
+                    "  family %d/%d: %s (cluster=%s)",
+                    fi,
+                    len(params["strategy_families"]),
+                    family,
+                    cm_fam,
+                )
             p = dict(params)
             p["_family"] = family
             dr, stab, _, clab, wevents = _accumulate_family_returns(
                 R,
                 edges,
                 p,
-                cluster_method=default_cluster,
+                cluster_method=cm_fam,
                 hybrid_alpha=None,
                 max_rebalances=max_reb,
                 quick=quick,
+                collect_cluster_labels=(cm_fam == default_cluster),
+                show_progress=show_progress and not quick,
+                progress_desc=f"{family} ({cm_fam})",
             )
             all_cluster_labels.extend(clab)
             if family == "supplier_pressure":
@@ -755,7 +908,7 @@ def run_final_research_pipeline(
             family_rows.append(
                 {
                     "strategy_family": family,
-                    "cluster_method": default_cluster,
+                    "cluster_method": cm_fam,
                     "edge_score": params["edge_score"],
                     "ann_return": met["ann_return"],
                     "ann_vol": met["ann_vol"],
@@ -770,27 +923,34 @@ def run_final_research_pipeline(
 
         pd.DataFrame(family_rows).to_csv(out_dir / "strategy_family_comparison.csv", index=False)
         _write_family_core_outputs(out_dir, all_daily)
+        _write_strategy_families_dashboard(out_dir, all_daily, family_rows)
+        logger.info(
+            "Wrote strategy_family_comparison.csv and plots/strategy_families_dashboard.png "
+            "(clusters: %s)",
+            fam_clusters,
+        )
     if "cluster_sweep" in enabled:
         assert R is not None and edges is not None
-        cm_list = list(params["cluster_methods"])
+        cm_list = _exclude_cluster_sweep_methods(list(params["cluster_methods"]))
         if not quick:
-            cm_list = list(
-                dict.fromkeys(
-                    cm_list
-                    + [
-                        "sector",
-                        "ggroup",
-                        "gind",
-                        "gsubind",
-                        "naics2",
-                        "naics",
-                        "sic2",
-                        "supply_community",
-                        "symmetric_spectral",
-                        "hermitian",
-                        "signed",
-                        "hybrid_prior",
-                    ]
+            cm_list = _exclude_cluster_sweep_methods(
+                list(
+                    dict.fromkeys(
+                        cm_list
+                        + [
+                            "sector",
+                            "ggroup",
+                            "gind",
+                            "gsubind",
+                            "naics2",
+                            "naics",
+                            "sic2",
+                            "supply_community",
+                            "symmetric_spectral",
+                            "hermitian",
+                            "signed",
+                        ]
+                    )
                 )
             )
         step_n += 1
@@ -802,61 +962,97 @@ def run_final_research_pipeline(
             1 if quick else 2,
         )
         cluster_families = ("metacluster",) if quick else ("metacluster", "clusterrank")
-        for cmi, cm in enumerate(cm_list, start=1):
-            for family in cluster_families:
-                if family not in params["strategy_families"]:
-                    continue
+        cluster_daily_parts: list[pd.DataFrame] = []
+        sweep_tasks = [
+            (cm, family)
+            for cm in cm_list
+            for family in cluster_families
+            if family in params["strategy_families"]
+        ]
+        sweep_iter: Any = sweep_tasks
+        if show_progress and sweep_tasks:
+            from tqdm.auto import tqdm
+
+            sweep_iter = tqdm(
+                sweep_tasks,
+                desc="cluster sweep",
+                unit="run",
+                total=len(sweep_tasks),
+            )
+        if show_progress and sweep_tasks:
+            logger.info(
+                "Cluster sweep progress: %d runs × ~%d rebalances each (tqdm)",
+                len(sweep_tasks),
+                max_reb or 156,
+            )
+        for cmi, (cm, family) in enumerate(sweep_iter, start=1):
+            if not show_progress:
                 logger.info("  cluster %d/%d: %s × %s", cmi, len(cm_list), cm, family)
-                p = dict(params)
-                p["_family"] = family
-                try:
-                    dr, stab, meta, clab, _ = _accumulate_family_returns(
-                        R,
-                        edges,
-                        p,
-                        cluster_method=cm,
-                        max_rebalances=max_reb,
-                        quick=quick,
-                        collect_cluster_labels=(cm == default_cluster),
-                    )
-                    all_cluster_labels.extend(clab)
-                except ClusteringMethodError:
-                    cluster_rows.append(
-                        {
-                            "strategy_family": family,
-                            "cluster_method": cm,
-                            "status": "skipped",
-                            "warning": "clustering unavailable",
-                        }
-                    )
-                    warnings.append(f"skipped {cm} for {family}")
-                    logger.warning("  skipped %s × %s (clustering unavailable)", cm, family)
-                    continue
-                met = _metrics_from_returns(dr)
-                ari_mean = float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan
-                drift_mean = float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan
+            p = dict(params)
+            p["_family"] = family
+            try:
+                dr, stab, meta, clab, _ = _accumulate_family_returns(
+                    R,
+                    edges,
+                    p,
+                    cluster_method=cm,
+                    max_rebalances=max_reb,
+                    quick=quick,
+                    collect_cluster_labels=(cm == default_cluster),
+                    show_progress=show_progress,
+                    progress_desc=f"{cm} × {family}",
+                )
+                all_cluster_labels.extend(clab)
+            except ClusteringMethodError:
                 cluster_rows.append(
                     {
                         "strategy_family": family,
                         "cluster_method": cm,
-                        "n_clusters": params["n_clusters"],
-                        "edge_score": params["edge_score"],
-                        "hybrid_alpha": np.nan,
-                        "ann_return": met["ann_return"],
-                        "ann_vol": met["ann_vol"],
-                        "sharpe": met["sharpe"],
-                        "max_drawdown": met["max_drawdown"],
-                        "avg_turnover": met["avg_turnover"],
-                        "cluster_ari_mean": ari_mean,
-                        "eigenspace_drift_mean": drift_mean,
-                        "n_rebalances": meta.get("n_rebalances", 0),
+                        "status": "skipped",
+                        "warning": "clustering unavailable",
                     }
                 )
-                stability_all.extend(stab)
-        cluster_cmp = pd.DataFrame(cluster_rows)
+                warnings.append(f"skipped {cm} for {family}")
+                logger.warning("  skipped %s × %s (clustering unavailable)", cm, family)
+                continue
+            met = _metrics_from_returns(dr)
+            if not dr.empty:
+                cluster_daily_parts.append(
+                    dr.rename("daily_return").to_frame().assign(
+                        strategy_family=family,
+                        cluster_method=cm,
+                    )
+                )
+            ari_mean = float(pd.Series([s["ari_prev"] for s in stab]).mean()) if stab else np.nan
+            drift_mean = float(pd.Series([s["eigenspace_drift"] for s in stab]).mean()) if stab else np.nan
+            cluster_rows.append(
+                {
+                    "strategy_family": family,
+                    "cluster_method": cm,
+                    "n_clusters": params["n_clusters"],
+                    "edge_score": params["edge_score"],
+                    "hybrid_alpha": np.nan,
+                    "ann_return": met["ann_return"],
+                    "ann_vol": met["ann_vol"],
+                    "sharpe": met["sharpe"],
+                    "max_drawdown": met["max_drawdown"],
+                    "avg_turnover": met["avg_turnover"],
+                    "cluster_ari_mean": ari_mean,
+                    "eigenspace_drift_mean": drift_mean,
+                    "n_rebalances": meta.get("n_rebalances", 0),
+                }
+            )
+            stability_all.extend(stab)
+        cluster_cmp = _filter_cluster_sweep_df(pd.DataFrame(cluster_rows))
         cluster_cmp.to_csv(out_dir / "cluster_method_comparison.csv", index=False)
+        cluster_daily = pd.DataFrame()
+        if cluster_daily_parts:
+            cluster_daily = _filter_cluster_sweep_df(pd.concat(cluster_daily_parts))
+            cluster_daily.index.name = "date"
+            cluster_daily = cluster_daily.reset_index()
+            cluster_daily.to_csv(out_dir / "cluster_sweep_daily_returns.csv", index=False)
         if not cluster_cmp.empty:
-            _write_cluster_sweep_plots(out_dir, cluster_cmp)
+            _write_cluster_sweep_plots(out_dir, cluster_cmp, cluster_daily=cluster_daily)
 
     hybrid_daily = pd.DataFrame()
     if "hybrid_sweep" in enabled:
@@ -1089,6 +1285,7 @@ def run_final_research_pipeline(
             "pipeline_steps": sorted(enabled),
             "plot_profile": profile,
             "default_cluster_method": default_cluster,
+            "family_cluster_methods": params.get("family_cluster_methods") or {},
             "warnings": warnings,
             "quick": quick,
         }
@@ -1392,10 +1589,77 @@ def run_hybrid_alpha_sweep(
     return out_dir / "hybrid_alpha_sweep.csv"
 
 
-def _write_cluster_sweep_plots(out_dir: Path, cluster_df: pd.DataFrame) -> None:
+def _write_cluster_sweep_cumulative_pnl_plots(
+    out_dir: Path,
+    cluster_daily: pd.DataFrame | None,
+    cluster_df: pd.DataFrame | None = None,
+) -> None:
+    """One cumulative-PnL chart per cluster-based family (all cluster methods)."""
+    plots = out_dir / "plots"
+    plots.mkdir(parents=True, exist_ok=True)
+    daily_path = out_dir / "cluster_sweep_daily_returns.csv"
+    if cluster_daily is None or cluster_daily.empty:
+        if not daily_path.is_file():
+            return
+        cluster_daily = pd.read_csv(daily_path, parse_dates=["date"])
+    cluster_daily = _filter_cluster_sweep_df(cluster_daily)
+    if cluster_daily.empty or "cluster_method" not in cluster_daily.columns:
+        return
+
+    daily = cluster_daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+    cmp = cluster_df
+    if cmp is None and (out_dir / "cluster_method_comparison.csv").is_file():
+        cmp = pd.read_csv(out_dir / "cluster_method_comparison.csv")
+
+    cmap = plt.colormaps.get_cmap("tab20")
+    for family in ("metacluster", "clusterrank"):
+        sub = daily[daily["strategy_family"] == family]
+        if sub.empty:
+            continue
+        methods = sorted(sub["cluster_method"].unique())
+        method_order = list(methods)
+        if cmp is not None and not cmp.empty:
+            ranked = cmp[
+                (cmp["strategy_family"] == family) & cmp["sharpe"].notna()
+            ].sort_values("sharpe", ascending=False)["cluster_method"]
+            method_order = [m for m in ranked if m in methods]
+            method_order += [m for m in methods if m not in method_order]
+
+        fig, ax = plt.subplots(figsize=(11, 5))
+        for i, cm in enumerate(method_order):
+            s = sub[sub["cluster_method"] == cm].set_index("date")["daily_return"].sort_index()
+            if s.empty:
+                continue
+            cum = (1 + s.fillna(0)).cumprod()
+            ax.plot(
+                cum.index,
+                cum,
+                color=cmap(i % 20),
+                linewidth=1.1,
+                label=str(cm),
+                alpha=0.9,
+            )
+        ax.axhline(1.0, ls="--", c="gray", lw=0.6)
+        ax.set_ylabel("Cumulative PnL")
+        ax.set_title(f"{family.replace('_', ' ')}: cumulative PnL by cluster method")
+        ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.9)
+        ax.grid(True, alpha=0.25)
+        plt.tight_layout()
+        out_name = f"cluster_sweep_cumulative_pnl_{family}.png"
+        plt.savefig(plots / out_name, dpi=150, bbox_inches="tight")
+        plt.close()
+
+
+def _write_cluster_sweep_plots(
+    out_dir: Path,
+    cluster_df: pd.DataFrame,
+    *,
+    cluster_daily: pd.DataFrame | None = None,
+) -> None:
     """Sharpe / stability visuals for Step 5 (cluster_method_comparison.csv)."""
     plots = out_dir / "plots"
-    base = cluster_df.copy()
+    base = _filter_cluster_sweep_df(cluster_df.copy())
     if "status" in base.columns:
         base = base[base["status"].fillna("ok") != "skipped"]
     if "n_rebalances" in base.columns:
@@ -1437,32 +1701,83 @@ def _write_cluster_sweep_plots(out_dir: Path, cluster_df: pd.DataFrame) -> None:
     plt.savefig(plots / "cluster_sweep_sharpe.png", dpi=150)
     plt.close()
 
-    # Dashboard: Sharpe (per family) + ARI (per cluster method only)
+    # Dashboard: Sharpe + optional max DD (per family) + ARI (per method)
     if not ari_by_method.empty:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+        has_dd = "max_drawdown" in base.columns
+        ncols = 3 if has_dd else 2
+        fig, axes = plt.subplots(1, ncols, figsize=(5.5 * ncols, 4.5))
+        if ncols == 2:
+            axes = list(axes)
         x = np.arange(len(method_order))
+        fam_colors = {"metacluster": "#e67e22", "clusterrank": "#1f77b4"}
         for fam in families:
             sub = traded[traded["strategy_family"] == fam].set_index("cluster_method").reindex(method_order)
             y = sub["sharpe"].to_numpy(dtype=float)
-            axes[0].plot(x, y, "o-", label=fam, linewidth=1.5, markersize=7)
+            color = fam_colors.get(fam, None)
+            axes[0].plot(
+                x,
+                y,
+                "o-",
+                label=fam,
+                linewidth=1.5,
+                markersize=7,
+                color=color,
+            )
+            _mark_dashboard_best_star(
+                axes[0],
+                method_order=method_order,
+                sub=sub,
+                metric="sharpe",
+            )
         axes[0].axhline(0, ls="--", c="gray", lw=0.8)
         axes[0].set_xticks(x)
         axes[0].set_xticklabels(method_order, rotation=28, ha="right")
         axes[0].set_ylabel("Sharpe")
-        axes[0].set_title("Sharpe by cluster method (per strategy family)")
+        axes[0].set_title("Sharpe by cluster method (★ = best per family)")
         axes[0].legend(fontsize=8, loc="lower left")
         axes[0].grid(True, alpha=0.25)
 
+        ari_ax = axes[2] if has_dd else axes[1]
+        if has_dd:
+            dd_base = base.dropna(subset=["max_drawdown", "strategy_family"])
+            for fam in families:
+                sub = dd_base[dd_base["strategy_family"] == fam].set_index("cluster_method").reindex(method_order)
+                y_dd = sub["max_drawdown"].to_numpy(dtype=float) * 100.0
+                color = fam_colors.get(fam, None)
+                axes[1].plot(
+                    x,
+                    y_dd,
+                    "o-",
+                    label=fam,
+                    linewidth=1.5,
+                    markersize=7,
+                    color=color,
+                )
+                _mark_dashboard_best_star(
+                    axes[1],
+                    method_order=method_order,
+                    sub=sub,
+                    metric="max_drawdown",
+                    y_scale=100.0,
+                )
+            axes[1].axhline(0, ls="--", c="gray", lw=0.8)
+            axes[1].set_xticks(x)
+            axes[1].set_xticklabels(method_order, rotation=28, ha="right")
+            axes[1].set_ylabel("Max drawdown (%)")
+            axes[1].set_title("Max drawdown by cluster method (★ = best per family)")
+            axes[1].legend(fontsize=8, loc="lower left")
+            axes[1].grid(True, alpha=0.25)
+
         ari_vals = ari_by_method.reindex(method_order).fillna(0).to_numpy()
-        bars = axes[1].bar(x, ari_vals, color="steelblue", alpha=0.85, edgecolor="white")
-        axes[1].set_xticks(x)
-        axes[1].set_xticklabels(method_order, rotation=28, ha="right")
-        axes[1].set_ylabel("Mean ARI")
-        axes[1].set_title("Label stability per cluster method")
-        axes[1].set_ylim(0, max(0.85, float(np.nanmax(ari_vals)) * 1.12))
-        axes[1].grid(True, axis="y", alpha=0.25)
+        bars = ari_ax.bar(x, ari_vals, color="steelblue", alpha=0.85, edgecolor="white")
+        ari_ax.set_xticks(x)
+        ari_ax.set_xticklabels(method_order, rotation=28, ha="right")
+        ari_ax.set_ylabel("Mean ARI")
+        ari_ax.set_title("Label stability per cluster method")
+        ari_ax.set_ylim(0, max(0.85, float(np.nanmax(ari_vals)) * 1.12))
+        ari_ax.grid(True, axis="y", alpha=0.25)
         for bar, v in zip(bars, ari_vals):
-            axes[1].text(
+            ari_ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.02,
                 f"{v:.2f}",
@@ -1470,16 +1785,13 @@ def _write_cluster_sweep_plots(out_dir: Path, cluster_df: pd.DataFrame) -> None:
                 va="bottom",
                 fontsize=8,
             )
-        fig.text(
-            0.5,
-            0.01,
-            "ARI measures how stable cluster labels are across rebalances — it does not depend on "
-            "metacluster vs clusterrank (same labels for both).",
-            ha="center",
-            fontsize=8,
-            color="0.35",
+        foot = (
+            "ARI is identical for metacluster vs clusterrank at a given method."
+            if not has_dd
+            else "★ = highest Sharpe / shallowest max drawdown within each family. ARI identical across families."
         )
-        plt.tight_layout(rect=[0, 0.04, 1, 1])
+        fig.text(0.5, 0.01, foot, ha="center", fontsize=8, color="0.35")
+        plt.tight_layout(rect=[0, 0.05, 1, 1])
         plt.savefig(plots / "cluster_sweep_dashboard.png", dpi=150)
         plt.close()
 
@@ -1590,6 +1902,8 @@ def _write_cluster_sweep_plots(out_dir: Path, cluster_df: pd.DataFrame) -> None:
         plt.savefig(plots / "cluster_sweep_sharpe_vs_ari.png", dpi=150, bbox_inches="tight")
         plt.close()
 
+    _write_cluster_sweep_cumulative_pnl_plots(out_dir, cluster_daily, cluster_df)
+
 
 def _write_plots(
     out_dir: Path,
@@ -1614,19 +1928,7 @@ def _write_plots(
     if all_daily:
         cum = pd.DataFrame({k: (1 + v.fillna(0)).cumprod() for k, v in all_daily.items()})
         if minimal:
-            fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-            for c in cum.columns:
-                axes[0].plot(cum.index, cum[c], label=c)
-            axes[0].set_title("Cumulative PnL by strategy family")
-            axes[0].legend(fontsize=8)
-            if family_rows:
-                df = pd.DataFrame(family_rows)
-                axes[1].bar(df["strategy_family"], df["sharpe"].fillna(0))
-                axes[1].set_title("Sharpe by strategy family")
-                axes[1].tick_params(axis="x", rotation=30)
-            plt.tight_layout()
-            plt.savefig(plots / "strategy_families_dashboard.png", dpi=150)
-            plt.close()
+            _write_strategy_families_dashboard(out_dir, all_daily, family_rows)
         elif not minimal:
             dd = pd.DataFrame({k: drawdown_series(v) for k, v in all_daily.items()})
             plt.figure(figsize=(8, 4))
@@ -1742,7 +2044,11 @@ def _write_plots(
         if cmp.is_file():
             cluster_df = pd.read_csv(cmp)
     if cluster_df is not None and not cluster_df.empty:
-        _write_cluster_sweep_plots(out_dir, cluster_df)
+        cluster_daily = None
+        cd_path = out_dir / "cluster_sweep_daily_returns.csv"
+        if cd_path.is_file():
+            cluster_daily = pd.read_csv(cd_path, parse_dates=["date"])
+        _write_cluster_sweep_plots(out_dir, cluster_df, cluster_daily=cluster_daily)
 
 
 def _report_df_md(df: pd.DataFrame) -> str:
@@ -1817,22 +2123,22 @@ def _cluster_narrative(cluster: pd.DataFrame | None) -> str:
     if csub.empty:
         return ""
     best = csub.loc[csub["sharpe"].idxmax()]
-    signed_mc = csub[
-        (csub["strategy_family"] == "metacluster") & (csub["cluster_method"] == "signed")
+    mc_sector = csub[
+        (csub["strategy_family"] == "metacluster") & (csub["cluster_method"] == "sector")
     ]
-    herm_mc = csub[
-        (csub["strategy_family"] == "metacluster") & (csub["cluster_method"] == "hermitian")
+    cr_signed = csub[
+        (csub["strategy_family"] == "clusterrank") & (csub["cluster_method"] == "signed")
     ]
     text = (
         f"**Interpretation:** Best cluster×family cell is **{best['strategy_family']} / {best['cluster_method']}** "
-        f"(Sharpe {best['sharpe']:.2f}). **Signed** clustering works well for metacluster; "
-        "**supply_community** is best for clusterrank. **Hermitian** and **hybrid_prior** underperform.\n"
+        f"(Sharpe {best['sharpe']:.2f}). Step 4 defaults: **metacluster → sector**, **clusterrank → signed** "
+        f"(supplier_pressure / globalrank use `signed` for bookkeeping only). "
+        f"`hybrid_prior` is excluded from cluster sweep (same C blend as hybrid α step).\n"
     )
-    if not signed_mc.empty and not herm_mc.empty:
-        text += (
-            f"- Metacluster: signed Sharpe {float(signed_mc['sharpe'].iloc[0]):.2f} vs "
-            f"hermitian {float(herm_mc['sharpe'].iloc[0]):.2f}.\n"
-        )
+    if not mc_sector.empty:
+        text += f"- Metacluster / sector: Sharpe {float(mc_sector['sharpe'].iloc[0]):.2f}.\n"
+    if not cr_signed.empty:
+        text += f"- Clusterrank / signed: Sharpe {float(cr_signed['sharpe'].iloc[0]):.2f}.\n"
     return text
 
 
@@ -2050,7 +2356,8 @@ def generate_final_report(
 
     fam = _load("strategy_family_comparison.csv")
     summary = _load("summary_metrics.csv")
-    cluster = _load("cluster_method_comparison.csv")
+    cluster_raw = _load("cluster_method_comparison.csv")
+    cluster = _filter_cluster_sweep_df(cluster_raw) if cluster_raw is not None else None
     hybrid = _load("hybrid_alpha_sweep.csv")
     panel = _load("panel_forward_reverse.csv")
     meta: dict[str, Any] = {}
@@ -2084,7 +2391,11 @@ def generate_final_report(
         start.append("| Hybrid α | `hybrid_alpha_sweep.csv` · `plots/methods_comparison.png` |\n")
     _write_methods_comparison_plots(out_dir)
     if cluster is not None and not cluster.empty:
-        _write_cluster_sweep_plots(out_dir, cluster)
+        cluster_daily = None
+        cd_path = out_dir / "cluster_sweep_daily_returns.csv"
+        if cd_path.is_file():
+            cluster_daily = pd.read_csv(cd_path, parse_dates=["date"])
+        _write_cluster_sweep_plots(out_dir, cluster, cluster_daily=cluster_daily)
     (out_dir / "START_HERE.md").write_text("".join(start), encoding="utf-8")
 
     n_reb = meta.get("n_rebalances")
@@ -2204,6 +2515,10 @@ def generate_final_report(
             md.append("\n**Mean ARI by method:** " + ", ".join(f"{k}: {v:.2f}" for k, v in ari.head(5).items()) + "\n")
         if (plots_dir / "cluster_sweep_dashboard.png").is_file():
             md.append("\n![Cluster sweep](../plots/cluster_sweep_dashboard.png)\n")
+        if (plots_dir / "cluster_sweep_cumulative_pnl_metacluster.png").is_file():
+            md.append("\n![Metacluster PnL by method](../plots/cluster_sweep_cumulative_pnl_metacluster.png)\n")
+        if (plots_dir / "cluster_sweep_cumulative_pnl_clusterrank.png").is_file():
+            md.append("\n![Clusterrank PnL by method](../plots/cluster_sweep_cumulative_pnl_clusterrank.png)\n")
     else:
         md.append("*Run cluster sweep.*\n")
 

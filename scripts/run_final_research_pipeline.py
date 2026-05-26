@@ -55,6 +55,11 @@ Examples:
         help="DEBUG logging (includes each rebalance date inside rolling loops)",
     )
     ap.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm progress bars during cluster_sweep (on by default for full runs)",
+    )
+    ap.add_argument(
         "--only",
         choices=sorted(PIPELINE_STEP_PRESETS.keys()),
         default=None,
@@ -84,6 +89,7 @@ Examples:
         quick=args.quick or (args.max_rebalances is not None and args.max_rebalances <= 3),
         repo_root=_ROOT,
         verbose=args.verbose,
+        show_progress=False if args.no_progress else None,
         only=args.only,
         steps=args.steps,
         skip_steps=args.skip_steps,
