@@ -3,8 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-*.csv
 results/backtest/
+results/final_research/*.csv
 .DS_Store
 pipeline
 parse.cpp
@@ -12,3 +12,5 @@ probe.py
 src/
 *.parquet
 !merged_edges.csv
+
+quick_script.py
