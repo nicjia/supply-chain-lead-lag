@@ -3,6 +3,8 @@ paths:
   returns_parquet: data/returns_with_gvkey.parquet
   earnings_calendar_csv: data/output_earnings_calendar.csv
   sector_map_csv: data/sector_map.csv
+  firm_classification_map_csv: data/firm_classification_map.csv
+  wrds_classification_csv: data/wrds_classification.csv
   output_dir: results/final_research
 pit:
   edge_date_col: filing_date
@@ -34,6 +36,13 @@ clustering:
   default_cluster_method: signed
   methods:
   - sector
+  - ggroup
+  - gind
+  - gsubind
+  - naics2
+  - naics
+  - sic2
+  - sic4
   - supply_community
   - symmetric_spectral
   - hermitian

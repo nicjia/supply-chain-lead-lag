@@ -853,7 +853,10 @@ def run_final_research_pipeline(
                     }
                 )
                 stability_all.extend(stab)
-        pd.DataFrame(cluster_rows).to_csv(out_dir / "cluster_method_comparison.csv", index=False)
+        cluster_cmp = pd.DataFrame(cluster_rows)
+        cluster_cmp.to_csv(out_dir / "cluster_method_comparison.csv", index=False)
+        if not cluster_cmp.empty:
+            _write_cluster_sweep_plots(out_dir, cluster_cmp)
 
     hybrid_daily = pd.DataFrame()
     if "hybrid_sweep" in enabled:
@@ -2080,6 +2083,8 @@ def generate_final_report(
     if (out_dir / "hybrid_alpha_sweep.csv").is_file():
         start.append("| Hybrid α | `hybrid_alpha_sweep.csv` · `plots/methods_comparison.png` |\n")
     _write_methods_comparison_plots(out_dir)
+    if cluster is not None and not cluster.empty:
+        _write_cluster_sweep_plots(out_dir, cluster)
     (out_dir / "START_HERE.md").write_text("".join(start), encoding="utf-8")
 
     n_reb = meta.get("n_rebalances")

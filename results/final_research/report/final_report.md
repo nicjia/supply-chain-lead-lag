@@ -24,7 +24,7 @@ Does supply-chain structure stabilize return-based lead-lag?         hybrid_alph
 - Returns: `data/returns_with_gvkey.parquet` · Edges: `data/merged_edges.csv`
 - PIT date column: `filing_date` · Rebalance: `BME`
 - Window: 2010-01-04–2024-12-31 · 12 rebalances · 5461 return assets · 17153 PIT edge rows
-- Pipeline steps in last run: `load, panel`
+- Pipeline steps in last run: `cluster_sweep, load, report`
 
 ## 4. Customer-pressure signal
 At each day \(d\), signal \(s = C^\top r_d\) (customer pressure on suppliers); long–short **suppliers only** with return earned on \(d+1\) (`supplier_pressure` family).
@@ -92,15 +92,19 @@ supplier_pressure         signed tstat_diff    0.041367 0.085974 0.481159     -0
 **Interpretation:** Best cluster×family cell is **clusterrank / supply_community** (Sharpe 0.51). **Signed** clustering works well for metacluster; **supply_community** is best for clusterrank. **Hermitian** and **hybrid_prior** underperform.
 - Metacluster: signed Sharpe 0.48 vs hermitian -0.24.
 
-strategy_family     cluster_method  n_clusters edge_score  hybrid_alpha  ann_return  ann_vol    sharpe  max_drawdown  avg_turnover  cluster_ari_mean  eigenspace_drift_mean  n_rebalances
-    clusterrank   supply_community          10 tstat_diff           NaN    0.052054 0.102657  0.507065     -0.208904           NaN          0.398399                1.77446            12
-    metacluster             signed          10 tstat_diff           NaN    0.050019 0.104267  0.479720     -0.400615           NaN          0.731133                1.77446            12
-    clusterrank             signed          10 tstat_diff           NaN    0.026855 0.070053  0.383356     -0.152914           NaN          0.731133                1.77446            12
-    clusterrank       hybrid_prior          10 tstat_diff           NaN    0.000106 0.056360  0.001877     -0.363305           NaN          0.215135                1.77446            12
-    metacluster       hybrid_prior          10 tstat_diff           NaN   -0.005862 0.169611 -0.034564     -0.619071           NaN          0.215135                1.77446            12
-    clusterrank symmetric_spectral          10 tstat_diff           NaN   -0.012532 0.099479 -0.125974     -0.364925           NaN          0.372646                1.77446            12
-    metacluster          hermitian          10 tstat_diff           NaN   -0.026382 0.110226 -0.239349     -0.530480           NaN          0.101397                1.77446            12
-    clusterrank          hermitian          10 tstat_diff           NaN   -0.031399 0.057055 -0.550340     -0.449463           NaN          0.101397                1.77446            12
+strategy_family   cluster_method  n_clusters edge_score  hybrid_alpha  ann_return  ann_vol   sharpe  max_drawdown  avg_turnover  cluster_ari_mean  eigenspace_drift_mean  n_rebalances
+    clusterrank supply_community          10 tstat_diff           NaN    0.052054 0.102657 0.507065     -0.208904           NaN          0.398399                1.77446            12
+    metacluster           signed          10 tstat_diff           NaN    0.050019 0.104267 0.479720     -0.400615           NaN          0.731133                1.77446            12
+    metacluster           ggroup          10 tstat_diff           NaN    0.051813 0.123175 0.420641     -0.230714           NaN          0.974179                1.77446            12
+    clusterrank           signed          10 tstat_diff           NaN    0.026855 0.070053 0.383356     -0.152914           NaN          0.731133                1.77446            12
+    metacluster           naics2          10 tstat_diff           NaN    0.034230 0.103587 0.330447     -0.308423           NaN          0.978027                1.77446            12
+    metacluster             gind          10 tstat_diff           NaN    0.032965 0.108857 0.302823     -0.350419           NaN          0.970007                1.77446            12
+    metacluster             sic2          10 tstat_diff           NaN    0.061017 0.220382 0.276868     -0.517821           NaN          0.972333                1.77446            12
+    metacluster          gsubind          10 tstat_diff           NaN    0.014403 0.060514 0.238009     -0.130435           NaN          0.959779                1.77446            12
+    clusterrank             sic2          10 tstat_diff           NaN    0.034272 0.177249 0.193357     -0.479803           NaN          0.972333                1.77446            12
+    clusterrank             sic4          10 tstat_diff           NaN    0.045730 0.249575 0.183231     -0.640818           NaN          0.966710                1.77446            12
+    clusterrank            naics          10 tstat_diff           NaN    0.049869 0.273798 0.182138     -0.707776           NaN          0.964343                1.77446            12
+    clusterrank           naics2          10 tstat_diff           NaN    0.016908 0.122295 0.138254     -0.329614           NaN          0.978027                1.77446            12
 
 ![Cluster sweep](../plots/cluster_sweep_dashboard.png)
 
