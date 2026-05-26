@@ -90,6 +90,12 @@ def load_sector_map(path: str | Path | None) -> pd.Series | None:
     return df.set_index("gvkey")["sector"]
 
 
+def load_firm_classification_map(path: str | Path | None) -> pd.DataFrame | None:
+    from supply_chain_leadlag.classification_data import load_firm_classification_map as _load
+
+    return _load(path)
+
+
 def load_earnings_calendar(path: str | Path | None) -> pd.DataFrame | None:
     p = Path(path) if path else None
     if p is None or not p.is_file():
@@ -299,6 +305,7 @@ def _accumulate_family_returns(
     n_reb_planned = len(rebalances)
 
     sector_map = load_sector_map(params.get("sector_map_csv"))
+    firm_map = load_firm_classification_map(params.get("firm_classification_map_csv"))
     daily_acc = pd.Series(0.0, index=idx)
     stability_rows: list[dict] = []
     last_labels: pd.Series | None = None
@@ -345,6 +352,7 @@ def _accumulate_family_returns(
                 cluster_method,
                 n_clusters=params["n_clusters"],
                 sector_map=sector_map,
+                firm_map=firm_map,
                 random_state=params["cluster_random_state"],
                 edges_pit=e_pit,
                 hybrid_prior_alpha=params.get("hybrid_prior_alpha", 0.5),
@@ -766,14 +774,25 @@ def run_final_research_pipeline(
         assert R is not None and edges is not None
         cm_list = list(params["cluster_methods"])
         if not quick:
-            cm_list = list(dict.fromkeys(cm_list + [
-                "sector",
-                "supply_community",
-                "symmetric_spectral",
-                "hermitian",
-                "signed",
-                "hybrid_prior",
-            ]))
+            cm_list = list(
+                dict.fromkeys(
+                    cm_list
+                    + [
+                        "sector",
+                        "ggroup",
+                        "gind",
+                        "gsubind",
+                        "naics2",
+                        "naics",
+                        "sic2",
+                        "supply_community",
+                        "symmetric_spectral",
+                        "hermitian",
+                        "signed",
+                        "hybrid_prior",
+                    ]
+                )
+            )
         step_n += 1
         logger.info(
             "Step %d/%d: cluster method comparison (%d methods × %d cluster-based families)",

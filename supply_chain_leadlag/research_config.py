@@ -62,6 +62,12 @@ def flat_research_params(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "returns_parquet": paths.get("returns_parquet", "data/returns_with_gvkey.parquet"),
         "earnings_calendar_csv": paths.get("earnings_calendar_csv", "data/output_earnings_calendar.csv"),
         "sector_map_csv": paths.get("sector_map_csv", "data/sector_map.csv"),
+        "firm_classification_map_csv": paths.get(
+            "firm_classification_map_csv", "data/firm_classification_map.csv"
+        ),
+        "wrds_classification_csv": paths.get(
+            "wrds_classification_csv", "data/wrds_classification.csv"
+        ),
         "output_dir": paths.get("output_dir", "results/final_research"),
         "edge_date_col": pit.get("edge_date_col", "filing_date"),
         "edge_expiry_days": int(edge_expiry) if edge_expiry is not None else 550,

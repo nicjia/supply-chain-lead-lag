@@ -32,7 +32,9 @@ Scripts add the repo root to `sys.path`, so you can run them without installing.
 | `data/returns_with_gvkey.parquet` | Daily `RET` by `gvkey` (**required for real backtests**) |
 | `data/leadlag_panel_forward.parquet` | Optional; built by `build_leadlag_panel.py` for PanelOLS |
 | `data/leadlag_panel_reverse.parquet` | Optional; reverse-direction placebo panel |
-| `data/sector_map.csv` | Optional; `gvkey`, `sector` for sector clustering |
+| `data/wrds_classification.csv` | Raw Compustat GICS / NAICS / SIC panel (annual rows per gvkey) |
+| `data/firm_classification_map.csv` | Built by `scripts/build_firm_classification_maps.py` — one row per gvkey |
+| `data/sector_map.csv` | Built from WRDS — `gvkey`, `sector` (= GICS `gsector`) for `sector` clustering |
 | `data/output_earnings_calendar.csv` | Optional; event-conditioned analysis |
 
 If returns parquet is missing, the final research pipeline falls back to a small synthetic panel (smoke only).
@@ -127,6 +129,23 @@ All four share the same return-based \(C_{\text{data}}\) at each rebalance (no h
 **Strategy families:** `supplier_pressure`, `globalrank`, `metacluster`, `clusterrank`
 
 **PIT rules:** edges with `date ≤` rebalance; \(C\) from trailing returns only; supplier-pressure uses \(s_d = C^\top r_d\), weights on \(d+1\); **customers signal, suppliers are traded**.
+
+Build industry maps from WRDS (dedupe to latest fiscal year per gvkey):
+
+```bash
+uv run python scripts/build_firm_classification_maps.py
+```
+
+**Classification clustering methods** (require `firm_classification_map.csv`):
+
+| Method | Source column | Typical # of groups |
+|--------|---------------|---------------------|
+| `sector` | GICS `gsector` | ~11 |
+| `ggroup` | GICS `ggroup` | ~27 |
+| `gind` | GICS `gind` | ~81 |
+| `gsubind` | GICS `gsubind` | ~189 |
+| `naics2` / `naics` | NAICS 2- or 6-digit | varies |
+| `sic2` / `sic4` | SIC 2- or 4-digit | varies |
 
 Optional panel FE before the pipeline:
 

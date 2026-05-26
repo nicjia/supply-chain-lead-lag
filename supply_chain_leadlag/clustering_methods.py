@@ -10,6 +10,10 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import SpectralClustering
 
+from supply_chain_leadlag.classification_data import (
+    CLASSIFICATION_CLUSTER_METHODS,
+    classification_column_for_method,
+)
 from supply_chain_leadlag.global_structure import meta_cluster_labels
 from supply_chain_leadlag.matrix import hybrid_matrix, structural_C_from_edges
 
@@ -50,32 +54,64 @@ def _spectral_on_affinity(A: np.ndarray, n_clusters: int, random_state: int) -> 
         return np.zeros(n, dtype=int)
 
 
+def cluster_by_classification(
+    nodes: list[str],
+    firm_map: pd.DataFrame | pd.Series | None,
+    column: str,
+    *,
+    unknown_label: str = "UNKNOWN",
+) -> np.ndarray:
+    """
+    Assign each node to an integer cluster id from a gvkey → industry code map.
+
+    ``firm_map``: DataFrame with ``gvkey`` + classification column, or Series indexed by gvkey.
+    """
+    if firm_map is None or (isinstance(firm_map, pd.DataFrame) and firm_map.empty):
+        raise ClusteringMethodError(f"classification clustering ({column}) requires firm_map")
+    if isinstance(firm_map, pd.DataFrame):
+        if "gvkey" in firm_map.columns and column in firm_map.columns:
+            sm = firm_map.set_index("gvkey")[column]
+        elif column in firm_map.columns:
+            sm = firm_map[column]
+        else:
+            raise ClusteringMethodError(f"firm_map missing column {column!r}")
+    else:
+        sm = firm_map
+    sm = sm.astype(str).replace({"nan": "", "None": ""})
+    labels: list[int] = []
+    buckets: list[str] = []
+    for n in nodes:
+        key = str(n).zfill(6)
+        s = sm.get(n, sm.get(key, unknown_label))
+        if not s or s == "nan":
+            s = unknown_label
+        if s not in buckets:
+            buckets.append(s)
+        labels.append(buckets.index(s))
+    return np.asarray(labels, dtype=int)
+
+
 def cluster_sector(
     nodes: list[str],
     sector_map: pd.DataFrame | pd.Series | None,
+    *,
+    firm_map: pd.DataFrame | None = None,
 ) -> np.ndarray:
     """
-    Cluster by sector label. ``sector_map`` must index gvkey with sector values
-    (columns ``gvkey``, ``sector`` or a Series indexed by gvkey).
+    Cluster by GICS sector. Uses ``sector_map`` (gvkey, sector) or ``firm_map['gsector']``.
     """
-    if sector_map is None or (isinstance(sector_map, pd.DataFrame) and sector_map.empty):
-        raise ClusteringMethodError("sector clustering requires sector_map")
-    if isinstance(sector_map, pd.DataFrame):
-        if "gvkey" in sector_map.columns and "sector" in sector_map.columns:
-            sm = sector_map.set_index("gvkey")["sector"]
+    if sector_map is not None and not (isinstance(sector_map, pd.DataFrame) and sector_map.empty):
+        if isinstance(sector_map, pd.DataFrame):
+            if "gvkey" in sector_map.columns and "sector" in sector_map.columns:
+                sm = sector_map.set_index("gvkey")["sector"]
+            else:
+                raise ClusteringMethodError("sector_map DataFrame needs gvkey, sector columns")
         else:
-            raise ClusteringMethodError("sector_map DataFrame needs gvkey, sector columns")
-    else:
-        sm = sector_map
-    sm = sm.astype(str)
-    labels = []
-    sectors = []
-    for n in nodes:
-        s = sm.get(n, sm.get(str(n).zfill(6), "UNKNOWN"))
-        if s not in sectors:
-            sectors.append(s)
-        labels.append(sectors.index(s))
-    return np.asarray(labels, dtype=int)
+            sm = sector_map
+        return cluster_by_classification(nodes, sm, "sector")
+    if firm_map is not None and "gsector" in firm_map.columns:
+        return cluster_by_classification(nodes, firm_map, "gsector")
+    raise ClusteringMethodError("sector clustering requires sector_map or firm_map with gsector")
 
 
 def cluster_supply_community(
@@ -149,6 +185,7 @@ def get_cluster_labels(
     n_clusters: int = 10,
     side_info: pd.DataFrame | None = None,
     sector_map: pd.DataFrame | pd.Series | None = None,
+    firm_map: pd.DataFrame | None = None,
     random_state: int = 42,
     *,
     edges_pit: pd.DataFrame | None = None,
@@ -159,15 +196,30 @@ def get_cluster_labels(
     """
     Return cluster label for each node in ``C.index`` ∪ ``C.columns``.
 
-    Methods: ``sector``, ``supply_community``, ``symmetric_spectral``, ``hermitian``,
-    ``signed``, ``hybrid_prior`` (Hermitian on hybrid matrix).
+    Network methods: ``supply_community``, ``symmetric_spectral``, ``hermitian``,
+    ``signed``, ``hybrid_prior``.
+
+    Industry / GICS (requires ``firm_map`` or ``sector_map``):
+    ``sector``/``gsector``, ``ggroup``, ``gind``/``industry``, ``gsubind``,
+    ``naics``, ``naics2``, ``naics3``, ``sic``, ``sic2``, ``sic4``.
     """
-    del kwargs
+    del kwargs, side_info
     nodes = _nodes(C)
     Cn = _align_C(C, nodes)
 
-    if method == "sector":
-        lab = cluster_sector(nodes, sector_map)
+    col = classification_column_for_method(method)
+    if col is not None:
+        fmap = firm_map
+        if fmap is None and sector_map is not None and method in ("sector", "gsector"):
+            lab = cluster_sector(nodes, sector_map, firm_map=None)
+        else:
+            if fmap is None:
+                raise ClusteringMethodError(
+                    f"method {method!r} requires firm_classification_map (column {col!r})"
+                )
+            lab = cluster_by_classification(nodes, fmap, col)
+    elif method == "sector":
+        lab = cluster_sector(nodes, sector_map, firm_map=firm_map)
     elif method == "supply_community":
         if edges_pit is None:
             raise ClusteringMethodError("supply_community requires edges_pit")

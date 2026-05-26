@@ -47,3 +47,19 @@ def test_sector_with_map():
     sm = pd.DataFrame({"gvkey": C.index, "sector": ["A", "A", "B", "B"]})
     lab = get_cluster_labels(C, "sector", sector_map=sm)
     assert len(lab) == 4
+
+
+def test_gind_clustering_from_firm_map():
+    C = _tiny_C()
+    fm = pd.DataFrame(
+        {
+            "gvkey": C.index,
+            "gsector": ["10", "10", "20", "20"],
+            "gind": ["101010", "101010", "202020", "202020"],
+        }
+    )
+    lab = get_cluster_labels(C, "gind", firm_map=fm)
+    assert len(lab) == 4
+    assert lab.iloc[0] == lab.iloc[1]
+    assert lab.iloc[2] == lab.iloc[3]
+    assert lab.iloc[0] != lab.iloc[2]
